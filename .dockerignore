@@ -1,0 +1,32 @@
+# Python
+**/__pycache__
+**/*.pyc
+**/*.pyo
+backend/venv
+backend/.venv
+backend/data
+backend/staticfiles
+
+# Node
+frontend/node_modules
+frontend/build
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production.local
+
+# Git
+.git
+.gitignore
+
+# Environment
+.env
+*.env
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db

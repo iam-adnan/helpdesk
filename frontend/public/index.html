@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0a0a0f" />
+  <meta name="description" content="Mindstorm Studios IT Helpdesk" />
+  <title>Mindstorm Helpdesk</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@300;400;500;600;700;800&family=Barlow+Condensed:wght@600;700;800&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0a0f; color: #f0f0f8; font-family: 'Barlow', sans-serif; }
+    #root { min-height: 100vh; }
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 3px; }
+    @keyframes pulse { 0%,100%{opacity:.3;transform:scale(.8)} 50%{opacity:1;transform:scale(1)} }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes slideUp { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:none; } }
+    @keyframes fadeIn { from{opacity:0} to{opacity:1} }
+    .app-loading {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #0a0a0f;
+      flex-direction: column;
+      gap: 20px;
+    }
+    .app-loading-dots {
+      display: flex;
+      gap: 8px;
+    }
+    .app-loading-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #00e6b4;
+    }
+    .app-loading-dot:nth-child(1) { animation: pulse 1.2s 0s infinite; }
+    .app-loading-dot:nth-child(2) { animation: pulse 1.2s 0.2s infinite; }
+    .app-loading-dot:nth-child(3) { animation: pulse 1.2s 0.4s infinite; }
+  </style>
+</head>
+<body>
+  <noscript>You need to enable JavaScript to run this app.</noscript>
+  <div id="root">
+    <!-- Initial loading shown before React hydrates -->
+    <div class="app-loading">
+      <svg width="52" height="52" viewBox="0 0 100 100" fill="none">
+        <rect width="100" height="100" rx="18" fill="#00e6b4"/>
+        <path d="M20 75 L35 30 L50 58 L65 30 L80 75" stroke="#0a0a0f" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <circle cx="50" cy="22" r="6" fill="#0a0a0f"/>
+      </svg>
+      <div class="app-loading-dots">
+        <div class="app-loading-dot"></div>
+        <div class="app-loading-dot"></div>
+        <div class="app-loading-dot"></div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
