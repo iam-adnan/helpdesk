@@ -1,0 +1,21 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y gcc libffi-dev && rm -rf /var/lib/apt/lists/*
+
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY backend/ .
+
+RUN mkdir -p /app/data /app/media /app/staticfiles && \
+    touch /app/data/helpdesk.log
+
+# Generate migration files at build time
+RUN python manage.py makemigrations accounts tickets notifications integrations reports settings_manager --noinput
+
+EXPOSE 8000

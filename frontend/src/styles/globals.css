@@ -1,0 +1,26 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+body {
+  @apply bg-dark-950 text-dark-100 font-sans;
+}
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { @apply bg-dark-900; }
+::-webkit-scrollbar-thumb { @apply bg-dark-600 rounded-full; }
+
+.btn-primary {
+  @apply bg-accent hover:bg-accent-dark text-white font-medium py-2 px-4 rounded-lg transition-colors;
+}
+.btn-secondary {
+  @apply bg-dark-700 hover:bg-dark-600 text-dark-100 font-medium py-2 px-4 rounded-lg transition-colors border border-dark-600;
+}
+.input-field {
+  @apply bg-dark-900 border border-dark-600 text-dark-100 rounded-lg px-4 py-2.5 w-full focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent placeholder-dark-500;
+}
+.card {
+  @apply bg-dark-900 border border-dark-700 rounded-xl p-6;
+}

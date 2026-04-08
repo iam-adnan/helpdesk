@@ -1,0 +1,425 @@
+---
+# ============================================
+# Namespace
+# ============================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: helpdesk
+
+---
+# ============================================
+# Persistent Volume Claims
+# ============================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sqlite-pvc
+  namespace: helpdesk
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: media-pvc
+  namespace: helpdesk
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+# ============================================
+# ConfigMap — shared environment
+# ============================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: helpdesk-config
+  namespace: helpdesk
+data:
+  DJANGO_SETTINGS_MODULE: "helpdesk.settings"
+  DATABASE_PATH: "/app/data/db.sqlite3"
+  ALLOWED_HOSTS: "*"
+  CELERY_BROKER_URL: "redis://redis:6379/0"
+  DEBUG: "false"
+  PORTAL_URL: "http://localhost:30080"
+
+---
+# ============================================
+# Secret — change these!
+# ============================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: helpdesk-secret
+  namespace: helpdesk
+type: Opaque
+stringData:
+  SECRET_KEY: "change-this-to-a-long-random-string-in-production-64-chars"
+  CORS_ALLOWED_ORIGINS: "http://localhost:30080,http://localhost"
+
+---
+# ============================================
+# Redis
+# ============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: helpdesk
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: helpdesk
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+
+---
+# ============================================
+# Backend (Django)
+# ============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: helpdesk
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+    spec:
+      initContainers:
+        - name: migrate
+          image: BACKEND_IMAGE_PLACEHOLDER
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /app/data && touch /app/data/helpdesk.log &&
+              python manage.py makemigrations accounts tickets notifications integrations reports settings_manager --noinput &&
+              python manage.py migrate --noinput &&
+              python manage.py collectstatic --noinput
+          envFrom:
+            - configMapRef:
+                name: helpdesk-config
+            - secretRef:
+                name: helpdesk-secret
+          volumeMounts:
+            - name: sqlite
+              mountPath: /app/data
+            - name: media
+              mountPath: /app/media
+      containers:
+        - name: backend
+          image: BACKEND_IMAGE_PLACEHOLDER
+          command:
+            - gunicorn
+            - helpdesk.wsgi:application
+            - --bind=0.0.0.0:8000
+            - --workers=3
+            - --threads=2
+            - --timeout=120
+            - --access-logfile=-
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: helpdesk-config
+            - secretRef:
+                name: helpdesk-secret
+          volumeMounts:
+            - name: sqlite
+              mountPath: /app/data
+            - name: media
+              mountPath: /app/media
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "200m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /api/health/
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health/
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      volumes:
+        - name: sqlite
+          persistentVolumeClaim:
+            claimName: sqlite-pvc
+        - name: media
+          persistentVolumeClaim:
+            claimName: media-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: helpdesk
+spec:
+  selector:
+    app: backend
+  ports:
+    - port: 8000
+
+---
+# ============================================
+# Frontend (Next.js)
+# ============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: helpdesk
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: FRONTEND_IMAGE_PLACEHOLDER
+          ports:
+            - containerPort: 3000
+          env:
+            - name: NEXT_PUBLIC_API_URL
+              value: "/api"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "300m"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: helpdesk
+spec:
+  selector:
+    app: frontend
+  ports:
+    - port: 3000
+
+---
+# ============================================
+# Celery Worker
+# ============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: celery
+  namespace: helpdesk
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: celery
+  template:
+    metadata:
+      labels:
+        app: celery
+    spec:
+      containers:
+        - name: celery
+          image: BACKEND_IMAGE_PLACEHOLDER
+          command:
+            - celery
+            - -A
+            - helpdesk
+            - worker
+            - -l
+            - info
+            - --concurrency=2
+          envFrom:
+            - configMapRef:
+                name: helpdesk-config
+            - secretRef:
+                name: helpdesk-secret
+          volumeMounts:
+            - name: sqlite
+              mountPath: /app/data
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "300m"
+      volumes:
+        - name: sqlite
+          persistentVolumeClaim:
+            claimName: sqlite-pvc
+
+---
+# ============================================
+# Slack Bot
+# ============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: slack-bot
+  namespace: helpdesk
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: slack-bot
+  template:
+    metadata:
+      labels:
+        app: slack-bot
+    spec:
+      containers:
+        - name: slack-bot
+          image: BACKEND_IMAGE_PLACEHOLDER
+          command: ["python", "slack_bot.py"]
+          envFrom:
+            - configMapRef:
+                name: helpdesk-config
+            - secretRef:
+                name: helpdesk-secret
+          volumeMounts:
+            - name: sqlite
+              mountPath: /app/data
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+      volumes:
+        - name: sqlite
+          persistentVolumeClaim:
+            claimName: sqlite-pvc
+
+---
+# ============================================
+# Nginx (reverse proxy + static)
+# ============================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: helpdesk
+data:
+  default.conf: |
+    upstream backend { server backend:8000; }
+    upstream frontend_up { server frontend:3000; }
+    server {
+      listen 80;
+      server_name _;
+      client_max_body_size 50M;
+      location /api/ { proxy_pass http://backend; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; proxy_read_timeout 300s; }
+      location /admin/ { proxy_pass http://backend; proxy_set_header Host $host; }
+      location /static/ { proxy_pass http://backend; }
+      location /media/ { proxy_pass http://backend; }
+      location / { proxy_pass http://frontend_up; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade"; }
+    }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  namespace: helpdesk
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nginx/conf.d/
+      volumes:
+        - name: config
+          configMap:
+            name: nginx-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+  namespace: helpdesk
+spec:
+  type: NodePort
+  selector:
+    app: nginx
+  ports:
+    - port: 80
+      targetPort: 80
+      nodePort: 30080

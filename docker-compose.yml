@@ -1,0 +1,106 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: helpdesk-backend
+    restart: always
+    volumes:
+      - sqlite_data:/app/data
+      - media_data:/app/media
+    ports:
+      - "8000:8000"
+    environment:
+      - DJANGO_SETTINGS_MODULE=helpdesk.settings
+      - DATABASE_PATH=/app/data/db.sqlite3
+      - PORTAL_URL=https://192.168.50.25
+      - ALLOWED_HOSTS=*
+      - CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost,https://192.168.50.25
+      - SECRET_KEY=ms-hd-prod-key-change-me-to-random-64-chars
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - DEBUG=true
+    depends_on:
+      - redis
+    command: >
+      sh -c "mkdir -p /app/data &&
+             touch /app/data/helpdesk.log &&
+             python manage.py makemigrations accounts tickets notifications integrations reports settings_manager --noinput &&
+             python manage.py migrate --noinput &&
+             python manage.py collectstatic --noinput &&
+             gunicorn helpdesk.wsgi:application --bind 0.0.0.0:8000 --workers 3 --threads 2 --timeout 120 --access-logfile - --error-logfile -"
+
+  slack-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: helpdesk-slack-bot
+    restart: always
+    volumes:
+      - sqlite_data:/app/data
+    environment:
+      - DATABASE_PATH=/app/data/db.sqlite3
+      - PORTAL_URL=https://192.168.50.25
+    depends_on:
+      - backend
+    command: >
+      sh -c "sleep 20 && python slack_bot.py"
+
+  celery:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: helpdesk-celery
+    restart: always
+    volumes:
+      - sqlite_data:/app/data
+      - media_data:/app/media
+    environment:
+      - DJANGO_SETTINGS_MODULE=helpdesk.settings
+      - DATABASE_PATH=/app/data/db.sqlite3
+      - PORTAL_URL=https://192.168.50.25
+      - CELERY_BROKER_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+      - backend
+    command: >
+      sh -c "sleep 15 && celery -A helpdesk worker -l info --concurrency=2"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: helpdesk-frontend
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=/api
+    depends_on:
+      - backend
+
+  redis:
+    image: redis:7-alpine
+    container_name: helpdesk-redis
+    restart: always
+    volumes:
+      - redis_data:/data
+
+  nginx:
+    image: nginx:alpine
+    container_name: helpdesk-nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf
+      - ./ssl:/etc/nginx/ssl:ro
+      - media_data:/app/media
+    depends_on:
+      - backend
+      - frontend
+
+volumes:
+  sqlite_data:
+  media_data:
+  redis_data:

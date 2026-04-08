@@ -1,0 +1,392 @@
+name: Mindstorm Helpdesk CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  DOCKER_REGISTRY: docker.io
+  DOCKER_BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/helpdesk-backend
+  DOCKER_FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/helpdesk-frontend
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  # ============================================
+  # JOB 1: Unit Tests
+  # ============================================
+  test-backend:
+    name: "🧪 Backend Tests"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          cd backend
+          pip install -r requirements.txt
+          pip install pytest pytest-django coverage
+
+      - name: Run tests
+        run: |
+          cd backend
+          mkdir -p data
+          touch data/helpdesk.log
+          export DATABASE_PATH=data/test.sqlite3
+          export DJANGO_SETTINGS_MODULE=helpdesk.settings
+          export SECRET_KEY=test-secret-key
+          export CELERY_BROKER_URL=redis://localhost:6379/0
+          python manage.py makemigrations accounts tickets notifications integrations reports settings_manager --noinput
+          python manage.py migrate --noinput
+          python -m pytest --tb=short -q || python manage.py test --verbosity=2
+
+      - name: Run coverage
+        run: |
+          cd backend
+          export DATABASE_PATH=data/test.sqlite3
+          export DJANGO_SETTINGS_MODULE=helpdesk.settings
+          export SECRET_KEY=test-secret-key
+          export CELERY_BROKER_URL=redis://localhost:6379/0
+          coverage run manage.py test 2>/dev/null || true
+          coverage xml -o coverage.xml 2>/dev/null || true
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-coverage
+          path: backend/coverage.xml
+
+  test-frontend:
+    name: "🧪 Frontend Tests"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: |
+          cd frontend
+          npm ci
+
+      - name: Lint check
+        run: |
+          cd frontend
+          npx next lint --quiet 2>/dev/null || echo "Lint completed"
+
+      - name: Build check
+        run: |
+          cd frontend
+          npm run build
+        env:
+          NEXT_PUBLIC_API_URL: /api
+
+  # ============================================
+  # JOB 2: SonarQube Analysis (SonarCloud)
+  # ============================================
+  sonar-analysis:
+    name: "🔍 SonarCloud Analysis"
+    runs-on: ubuntu-latest
+    needs: [test-backend, test-frontend]
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-coverage
+          path: backend/
+        continue-on-error: true
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.projectKey=${{ secrets.SONAR_PROJECT_KEY }}
+            -Dsonar.organization=${{ secrets.SONAR_ORGANIZATION }}
+            -Dsonar.sources=backend,frontend/src
+            -Dsonar.python.coverage.reportPaths=backend/coverage.xml
+            -Dsonar.exclusions=**/node_modules/**,**/__pycache__/**,**/migrations/**
+        continue-on-error: true
+
+  # ============================================
+  # JOB 3: Trivy Source Scan
+  # ============================================
+  trivy-source-scan:
+    name: "🛡️ Trivy Source Scan"
+    runs-on: ubuntu-latest
+    needs: [test-backend, test-frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner (filesystem)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          format: "table"
+          exit-code: "0"
+          severity: "CRITICAL,HIGH"
+
+      - name: Run Trivy (SARIF output)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          format: "sarif"
+          output: "trivy-source.sarif"
+        continue-on-error: true
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: "trivy-source.sarif"
+        continue-on-error: true
+
+  # ============================================
+  # JOB 4: Build Docker Images
+  # ============================================
+  build-and-push:
+    name: "📦 Build & Push Docker Images"
+    runs-on: ubuntu-latest
+    needs: [test-backend, test-frontend, trivy-source-scan]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build Backend Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.backend
+          push: false
+          load: true
+          tags: ${{ env.DOCKER_BACKEND_IMAGE }}:${{ env.IMAGE_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build Frontend Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.frontend
+          push: false
+          load: true
+          tags: ${{ env.DOCKER_FRONTEND_IMAGE }}:${{ env.IMAGE_TAG }}
+          build-args: |
+            NEXT_PUBLIC_API_URL=/api
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ---- Trivy Image Scans ----
+      - name: "🛡️ Trivy Scan Backend Image"
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.DOCKER_BACKEND_IMAGE }}:${{ env.IMAGE_TAG }}
+          format: "table"
+          exit-code: "0"
+          severity: "CRITICAL,HIGH"
+
+      - name: "🛡️ Trivy Scan Frontend Image"
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.DOCKER_FRONTEND_IMAGE }}:${{ env.IMAGE_TAG }}
+          format: "table"
+          exit-code: "0"
+          severity: "CRITICAL,HIGH"
+
+      # ---- Push Images ----
+      - name: Push Backend Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.backend
+          push: true
+          tags: |
+            ${{ env.DOCKER_BACKEND_IMAGE }}:${{ env.IMAGE_TAG }}
+            ${{ env.DOCKER_BACKEND_IMAGE }}:latest
+          cache-from: type=gha
+
+      - name: Push Frontend Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.frontend
+          push: true
+          tags: |
+            ${{ env.DOCKER_FRONTEND_IMAGE }}:${{ env.IMAGE_TAG }}
+            ${{ env.DOCKER_FRONTEND_IMAGE }}:latest
+          build-args: |
+            NEXT_PUBLIC_API_URL=/api
+          cache-from: type=gha
+
+  # ============================================
+  # JOB 5: Deploy to K3s on EC2
+  # ============================================
+  deploy:
+    name: "🚀 Deploy to K3s"
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+            export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+            export IMAGE_TAG=${{ env.IMAGE_TAG }}
+            export BACKEND_IMAGE=${{ env.DOCKER_BACKEND_IMAGE }}:${{ env.IMAGE_TAG }}
+            export FRONTEND_IMAGE=${{ env.DOCKER_FRONTEND_IMAGE }}:${{ env.IMAGE_TAG }}
+
+            echo "=== Pulling latest images ==="
+            sudo docker pull $BACKEND_IMAGE
+            sudo docker pull $FRONTEND_IMAGE
+
+            echo "=== Applying K8s manifests ==="
+            cd /home/ubuntu/k8s || mkdir -p /home/ubuntu/k8s && cd /home/ubuntu/k8s
+
+            # Write manifests (they're also pushed via the step below)
+            cat > /tmp/deploy-patch.yaml << PATCH
+            spec:
+              template:
+                spec:
+                  containers:
+                  - name: backend
+                    image: $BACKEND_IMAGE
+            PATCH
+
+            # Update deployments with new image
+            sudo kubectl set image deployment/backend backend=$BACKEND_IMAGE -n helpdesk 2>/dev/null || true
+            sudo kubectl set image deployment/frontend frontend=$FRONTEND_IMAGE -n helpdesk 2>/dev/null || true
+            sudo kubectl set image deployment/slack-bot slack-bot=$BACKEND_IMAGE -n helpdesk 2>/dev/null || true
+            sudo kubectl set image deployment/celery celery=$BACKEND_IMAGE -n helpdesk 2>/dev/null || true
+
+            # If deployments don't exist yet, apply full manifests
+            if ! sudo kubectl get deployment backend -n helpdesk &>/dev/null; then
+              echo "First deployment — applying all manifests..."
+              sudo kubectl apply -f /home/ubuntu/k8s/ -n helpdesk
+            fi
+
+            echo "=== Waiting for rollout ==="
+            sudo kubectl rollout status deployment/backend -n helpdesk --timeout=120s || true
+            sudo kubectl rollout status deployment/frontend -n helpdesk --timeout=120s || true
+
+            echo "=== Status ==="
+            sudo kubectl get pods -n helpdesk
+            sudo kubectl get svc -n helpdesk
+
+      - name: Copy K8s manifests to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "k8s/*"
+          target: "/home/ubuntu/"
+
+  # ============================================
+  # JOB 6: Health Check
+  # ============================================
+  health-check:
+    name: "✅ Health Check"
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    steps:
+      - name: Wait for deployment
+        run: sleep 30
+
+      - name: Check backend health
+        run: |
+          for i in $(seq 1 10); do
+            STATUS=$(curl -sk -o /dev/null -w "%{http_code}" http://${{ secrets.EC2_HOST }}:30080/api/health/ 2>/dev/null || echo "000")
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Backend is healthy!"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "❌ Backend health check failed"
+          exit 1
+
+  # ============================================
+  # JOB 7: Email Notification
+  # ============================================
+  notify:
+    name: "📧 Notify"
+    runs-on: ubuntu-latest
+    needs: [health-check]
+    if: always()
+    steps:
+      - name: Send success email
+        if: needs.health-check.result == 'success'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "✅ Helpdesk Deployed — ${{ github.sha }}"
+          body: |
+            Mindstorm Helpdesk deployment successful!
+
+            Commit: ${{ github.sha }}
+            Branch: ${{ github.ref_name }}
+            By: ${{ github.actor }}
+            
+            App: http://${{ secrets.EC2_HOST }}:30080
+            Grafana: http://${{ secrets.EC2_HOST }}:30300
+          to: ${{ secrets.NOTIFY_EMAIL }}
+          from: "Helpdesk CI/CD <${{ secrets.EMAIL_USERNAME }}>"
+
+      - name: Send failure email
+        if: needs.health-check.result == 'failure'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "❌ Helpdesk Deploy FAILED — ${{ github.sha }}"
+          body: |
+            Deployment failed!
+
+            Commit: ${{ github.sha }}
+            Branch: ${{ github.ref_name }}
+            By: ${{ github.actor }}
+            
+            Check: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          to: ${{ secrets.NOTIFY_EMAIL }}
+          from: "Helpdesk CI/CD <${{ secrets.EMAIL_USERNAME }}>"
