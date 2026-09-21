@@ -133,17 +133,15 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8000"
     spec:
+      # The runtime image is distroless (no shell), so this can no longer be a single
+      # `sh -c "a && b && c"` step — each step is its own exec-form initContainer instead.
+      # Migration files and collected static assets are already generated at image BUILD
+      # time now (see Dockerfile.backend's builder stage), so the only step that still
+      # needs to run against the live, PVC-backed SQLite database at pod startup is `migrate`.
       initContainers:
         - name: migrate
           image: BACKEND_IMAGE_PLACEHOLDER
-          command:
-            - sh
-            - -c
-            - |
-              mkdir -p /app/data && touch /app/data/helpdesk.log &&
-              python manage.py makemigrations accounts tickets notifications integrations reports settings_manager --noinput &&
-              python manage.py migrate --noinput &&
-              python manage.py collectstatic --noinput
+          command: ["python3", "manage.py", "migrate", "--noinput"]
           envFrom:
             - configMapRef:
                 name: helpdesk-config
@@ -157,14 +155,8 @@ spec:
       containers:
         - name: backend
           image: BACKEND_IMAGE_PLACEHOLDER
-          command:
-            - gunicorn
-            - helpdesk.wsgi:application
-            - --bind=0.0.0.0:8000
-            - --workers=3
-            - --threads=2
-            - --timeout=120
-            - --access-logfile=-
+          # No command override: runs the image's own ENTRYPOINT/CMD
+          # (python3 -m gunicorn ..., defined in Dockerfile.backend).
           ports:
             - containerPort: 8000
           envFrom:
@@ -285,7 +277,11 @@ spec:
       containers:
         - name: celery
           image: BACKEND_IMAGE_PLACEHOLDER
+          # Distroless has no `celery` console-script binary on PATH (only python3
+          # itself, via /deps on PYTHONPATH) — invoke it as a module instead.
           command:
+            - python3
+            - -m
             - celery
             - -A
             - helpdesk
@@ -335,7 +331,8 @@ spec:
       containers:
         - name: slack-bot
           image: BACKEND_IMAGE_PLACEHOLDER
-          command: ["python", "slack_bot.py"]
+          # Distroless ships the binary as `python3`, not `python`.
+          command: ["python3", "slack_bot.py"]
           envFrom:
             - configMapRef:
                 name: helpdesk-config

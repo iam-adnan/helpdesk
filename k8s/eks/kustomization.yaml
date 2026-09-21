@@ -1,0 +1,23 @@
+namespace: helpdesk
+
+resources:
+  - ../base
+  - ingress.yaml
+  - secretstore.yaml
+  - externalsecret-helpdesk.yaml
+  # Uncomment for PRIVATE Docker Hub repos only (see externalsecret-dockerhub.yaml):
+  # - externalsecret-dockerhub.yaml
+
+patches:
+  - path: patch-storageclass.yaml
+  - path: patch-delete-resources.yaml
+  # Uncomment together with externalsecret-dockerhub.yaml above, for PRIVATE repos only:
+  # - path: patch-imagepullsecrets.yaml
+
+# NOTE: images are NOT rewritten here via Kustomize's `images:` transformer. The base
+# manifest's BACKEND_IMAGE_PLACEHOLDER / FRONTEND_IMAGE_PLACEHOLDER tokens (confirmed
+# against k8s/all-in-one.yaml: used by the backend/celery/slack-bot and frontend
+# Deployments respectively) are substituted by the CI deploy job via `kubectl set image`
+# after `kubectl apply -k .` — the same mechanism the old k3s deploy job already used,
+# just retargeted from SSH+kubectl-over-SSH to OIDC-authenticated kubectl. See the
+# "deploy" job in .github/workflows/cicd.yml.

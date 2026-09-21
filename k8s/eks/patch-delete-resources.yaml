@@ -1,0 +1,39 @@
+# Resources from the base manifest (k8s/all-in-one.yaml) that don't belong on EKS:
+#
+# 1. The nginx reverse-proxy Deployment/Service/ConfigMap — that NodePort:30080 pattern
+#    only made sense fronted by a single EC2 host's IP. On EKS the ALB Ingress
+#    (ingress.yaml) replaces its job directly (routing /api -> backend, / -> frontend),
+#    so running the nginx pod too would just be a redundant extra scheduling slot on an
+#    already-tight 2x t3.small node budget.
+# 2. The hardcoded, git-committed `helpdesk-secret` Secret (SECRET_KEY was literally
+#    checked into k8s/all-in-one.yaml as plaintext). On EKS, External Secrets Operator
+#    owns creating this same-named Secret from AWS Secrets Manager instead — see
+#    externalsecret-helpdesk.yaml. k3s/local deployments still get the hardcoded one
+#    straight from the base file, unaffected by this overlay.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  namespace: helpdesk
+$patch: delete
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+  namespace: helpdesk
+$patch: delete
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: helpdesk
+$patch: delete
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: helpdesk-secret
+  namespace: helpdesk
+$patch: delete

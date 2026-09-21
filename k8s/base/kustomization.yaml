@@ -1,0 +1,6 @@
+# Base kustomization wrapping the plain manifest, so overlays (../eks/) can reference
+# this directory as a base. Kustomize refuses to reach a bare file outside an overlay's
+# own directory tree directly, and refuses a parent-of-overlay reference as a cycle risk
+# — a sibling base/ + overlay/ layout (the standard Kustomize convention) avoids both.
+resources:
+  - all-in-one.yaml
