@@ -1,3 +1,32 @@
+# ============================================================================
+# Required GitHub repo configuration (Settings -> Secrets and variables -> Actions)
+# ============================================================================
+# Secrets (sensitive — set with `gh secret set NAME`):
+#   DOCKERHUB_USERNAME, DOCKERHUB_TOKEN   — Docker Hub push/pull (already configured)
+#   SONAR_TOKEN, SONAR_PROJECT_KEY,
+#   SONAR_ORGANIZATION                    — SonarCloud (already configured)
+#   EMAIL_USERNAME, EMAIL_PASSWORD,
+#   NOTIFY_EMAIL                          — deploy-result email (already configured)
+#   AWS_DEPLOY_ROLE_ARN                   — IAM role GitHub assumes via OIDC to deploy
+#                                            to EKS (infra/terraform/github-oidc.tf's
+#                                            `github_deploy_role_arn` output). NOT set
+#                                            yet — the AWS account this deploys to
+#                                            doesn't exist until it's created.
+#   SLACK_WEBHOOK_URL                     — Slack Incoming Webhook for pipeline/deploy
+#                                            notifications. NOT set yet.
+#
+# Variables (non-sensitive — set with `gh variable set NAME`):
+#   AWS_REGION           — e.g. "us-east-1"
+#   EKS_CLUSTER_NAME      — e.g. "helpdesk-eks" (infra/terraform/variables.tf's cluster_name)
+#   EKS_DEPLOY_ENABLED    — must be literally "true" to let the deploy/health-check/notify
+#                            tail actually run. Left unset/false until the new AWS account
+#                            + `terraform apply` (infra/terraform/) have actually happened —
+#                            until then this job intentionally no-ops instead of failing.
+#
+# No longer used by this workflow (the k3s-on-EC2 deploy path was replaced by EKS):
+#   EC2_HOST, EC2_SSH_KEY — safe to remove from repo secrets whenever convenient.
+# ============================================================================
+
 name: Mindstorm Helpdesk CI/CD
 
 on:
@@ -20,10 +49,10 @@ jobs:
     name: "🧪 Backend Tests"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -31,9 +60,8 @@ jobs:
         run: |
           cd backend
           pip install -r requirements.txt
-          pip install pytest pytest-django coverage
 
-      - name: Run tests
+      - name: Run tests with coverage
         run: |
           cd backend
           mkdir -p data
@@ -42,22 +70,11 @@ jobs:
           export DJANGO_SETTINGS_MODULE=helpdesk.settings
           export SECRET_KEY=test-secret-key
           export CELERY_BROKER_URL=redis://localhost:6379/0
-          python manage.py makemigrations accounts tickets notifications integrations reports settings_manager --noinput
-          python manage.py migrate --noinput
-          python -m pytest --tb=short -q || python manage.py test --verbosity=2
-
-      - name: Run coverage
-        run: |
-          cd backend
-          export DATABASE_PATH=data/test.sqlite3
-          export DJANGO_SETTINGS_MODULE=helpdesk.settings
-          export SECRET_KEY=test-secret-key
-          export CELERY_BROKER_URL=redis://localhost:6379/0
-          coverage run manage.py test 2>/dev/null || true
-          coverage xml -o coverage.xml 2>/dev/null || true
+          export CELERY_TASK_ALWAYS_EAGER=True
+          pytest --cov --cov-report=xml --cov-report=term-missing
 
       - name: Upload coverage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: always()
         with:
           name: backend-coverage
@@ -67,10 +84,10 @@ jobs:
     name: "🧪 Frontend Tests"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "20"
 
@@ -83,6 +100,18 @@ jobs:
         run: |
           cd frontend
           npx next lint --quiet 2>/dev/null || echo "Lint completed"
+
+      - name: Run tests with coverage
+        run: |
+          cd frontend
+          npm test -- --coverage
+
+      - name: Upload frontend coverage
+        uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: frontend-coverage
+          path: frontend/coverage/lcov.info
 
       - name: Build check
         run: |
@@ -100,15 +129,22 @@ jobs:
     needs: [test-backend, test-frontend]
     if: github.event_name == 'push'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - name: Download coverage
-        uses: actions/download-artifact@v4
+      - name: Download backend coverage
+        uses: actions/download-artifact@v5
         with:
           name: backend-coverage
           path: backend/
+        continue-on-error: true
+
+      - name: Download frontend coverage
+        uses: actions/download-artifact@v5
+        with:
+          name: frontend-coverage
+          path: frontend/coverage/
         continue-on-error: true
 
       - name: SonarCloud Scan
@@ -122,6 +158,7 @@ jobs:
             -Dsonar.organization=${{ secrets.SONAR_ORGANIZATION }}
             -Dsonar.sources=backend,frontend/src
             -Dsonar.python.coverage.reportPaths=backend/coverage.xml
+            -Dsonar.javascript.lcov.reportPaths=frontend/coverage/lcov.info
             -Dsonar.exclusions=**/node_modules/**,**/__pycache__/**,**/migrations/**
         continue-on-error: true
 
@@ -133,7 +170,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [test-backend, test-frontend]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Run Trivy vulnerability scanner (filesystem)
         uses: aquasecurity/trivy-action@master
@@ -161,15 +198,19 @@ jobs:
         continue-on-error: true
 
   # ============================================
-  # JOB 4: Build Docker Images
+  # JOB 4: Build & Push Docker Images (Docker Hub)
   # ============================================
+  # Both Dockerfiles are multi-stage with a distroless final stage (no shell, no package
+  # manager, non-root) — `docker build` with no --target builds that last stage by
+  # default, so this job's output is already the hardened production image; nothing
+  # here needs to change for that.
   build-and-push:
     name: "📦 Build & Push Docker Images"
     runs-on: ubuntu-latest
     needs: [test-backend, test-frontend, trivy-source-scan]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -181,7 +222,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build Backend Image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.backend
@@ -192,7 +233,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build Frontend Image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.frontend
@@ -223,7 +264,7 @@ jobs:
 
       # ---- Push Images ----
       - name: Push Backend Image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.backend
@@ -234,7 +275,7 @@ jobs:
           cache-from: type=gha
 
       - name: Push Frontend Image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.frontend
@@ -247,74 +288,65 @@ jobs:
           cache-from: type=gha
 
   # ============================================
-  # JOB 5: Deploy to K3s on EC2
+  # JOB 5: Deploy to EKS
   # ============================================
+  # Gated behind vars.EKS_DEPLOY_ENABLED == 'true' (unset/false by default) so this
+  # intentionally no-ops — rather than hard-failing every push to main — until the new
+  # AWS account exists, infra/terraform/ has actually been applied, and
+  # AWS_DEPLOY_ROLE_ARN is set. Flip the var once that's done; no further workflow
+  # changes needed.
   deploy:
-    name: "🚀 Deploy to K3s"
+    name: "🚀 Deploy to EKS"
     runs-on: ubuntu-latest
     needs: [build-and-push]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.EKS_DEPLOY_ENABLED == 'true'
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      alb_hostname: ${{ steps.alb.outputs.hostname }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Deploy to EC2 via SSH
-        uses: appleboy/ssh-action@v1
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            set -e
-            export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-            export IMAGE_TAG=${{ env.IMAGE_TAG }}
-            export BACKEND_IMAGE=${{ env.DOCKER_BACKEND_IMAGE }}:${{ env.IMAGE_TAG }}
-            export FRONTEND_IMAGE=${{ env.DOCKER_FRONTEND_IMAGE }}:${{ env.IMAGE_TAG }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
 
-            echo "=== Pulling latest images ==="
-            sudo docker pull $BACKEND_IMAGE
-            sudo docker pull $FRONTEND_IMAGE
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name ${{ vars.EKS_CLUSTER_NAME }} --region ${{ vars.AWS_REGION }}
 
-            echo "=== Applying K8s manifests ==="
-            cd /home/ubuntu/k8s || mkdir -p /home/ubuntu/k8s && cd /home/ubuntu/k8s
+      - name: Apply manifests (Ingress, ExternalSecret, StorageClass patches, etc.)
+        run: kubectl apply -k k8s/eks/
 
-            # Write manifests (they're also pushed via the step below)
-            cat > /tmp/deploy-patch.yaml << PATCH
-            spec:
-              template:
-                spec:
-                  containers:
-                  - name: backend
-                    image: $BACKEND_IMAGE
-            PATCH
+      - name: Roll out new images
+        run: |
+          kubectl -n helpdesk set image deployment/backend backend=${{ env.DOCKER_BACKEND_IMAGE }}:${{ env.IMAGE_TAG }}
+          kubectl -n helpdesk set image deployment/celery celery=${{ env.DOCKER_BACKEND_IMAGE }}:${{ env.IMAGE_TAG }}
+          kubectl -n helpdesk set image deployment/slack-bot slack-bot=${{ env.DOCKER_BACKEND_IMAGE }}:${{ env.IMAGE_TAG }}
+          kubectl -n helpdesk set image deployment/frontend frontend=${{ env.DOCKER_FRONTEND_IMAGE }}:${{ env.IMAGE_TAG }}
 
-            # Update deployments with new image
-            sudo kubectl set image deployment/backend backend=$BACKEND_IMAGE -n helpdesk 2>/dev/null || true
-            sudo kubectl set image deployment/frontend frontend=$FRONTEND_IMAGE -n helpdesk 2>/dev/null || true
-            sudo kubectl set image deployment/slack-bot slack-bot=$BACKEND_IMAGE -n helpdesk 2>/dev/null || true
-            sudo kubectl set image deployment/celery celery=$BACKEND_IMAGE -n helpdesk 2>/dev/null || true
+      - name: Wait for rollout
+        run: |
+          kubectl -n helpdesk rollout status deployment/backend --timeout=180s
+          kubectl -n helpdesk rollout status deployment/frontend --timeout=180s
+          kubectl -n helpdesk rollout status deployment/celery --timeout=180s
+          kubectl -n helpdesk rollout status deployment/slack-bot --timeout=180s
 
-            # If deployments don't exist yet, apply full manifests
-            if ! sudo kubectl get deployment backend -n helpdesk &>/dev/null; then
-              echo "First deployment — applying all manifests..."
-              sudo kubectl apply -f /home/ubuntu/k8s/ -n helpdesk
+      - name: Get ALB hostname
+        id: alb
+        run: |
+          for i in $(seq 1 20); do
+            HOSTNAME=$(kubectl -n helpdesk get ingress helpdesk-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            if [ -n "$HOSTNAME" ]; then
+              echo "hostname=$HOSTNAME" >> "$GITHUB_OUTPUT"
+              exit 0
             fi
-
-            echo "=== Waiting for rollout ==="
-            sudo kubectl rollout status deployment/backend -n helpdesk --timeout=120s || true
-            sudo kubectl rollout status deployment/frontend -n helpdesk --timeout=120s || true
-
-            echo "=== Status ==="
-            sudo kubectl get pods -n helpdesk
-            sudo kubectl get svc -n helpdesk
-
-      - name: Copy K8s manifests to EC2
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
-          source: "k8s/*"
-          target: "/home/ubuntu/"
+            echo "Waiting for ALB hostname... ($i/20)"
+            sleep 15
+          done
+          echo "::warning::ALB hostname not assigned after 5 minutes — health check will fail"
 
   # ============================================
   # JOB 6: Health Check
@@ -323,32 +355,35 @@ jobs:
     name: "✅ Health Check"
     runs-on: ubuntu-latest
     needs: [deploy]
+    if: vars.EKS_DEPLOY_ENABLED == 'true'
     steps:
-      - name: Wait for deployment
-        run: sleep 30
-
-      - name: Check backend health
+      - name: Check backend health via ALB
         run: |
+          HOSTNAME="${{ needs.deploy.outputs.alb_hostname }}"
+          if [ -z "$HOSTNAME" ]; then
+            echo "::error::No ALB hostname returned by the deploy job"
+            exit 1
+          fi
           for i in $(seq 1 10); do
-            STATUS=$(curl -sk -o /dev/null -w "%{http_code}" http://${{ secrets.EC2_HOST }}:30080/api/health/ 2>/dev/null || echo "000")
+            STATUS=$(curl -sk -o /dev/null -w "%{http_code}" "http://$HOSTNAME/api/health/" 2>/dev/null || echo "000")
             echo "Attempt $i: HTTP $STATUS"
             if [ "$STATUS" = "200" ]; then
               echo "✅ Backend is healthy!"
               exit 0
             fi
-            sleep 10
+            sleep 15
           done
           echo "❌ Backend health check failed"
           exit 1
 
   # ============================================
-  # JOB 7: Email Notification
+  # JOB 7: Notifications (Email + Slack)
   # ============================================
   notify:
-    name: "📧 Notify"
+    name: "📣 Notify"
     runs-on: ubuntu-latest
-    needs: [health-check]
-    if: always()
+    needs: [deploy, health-check]
+    if: always() && vars.EKS_DEPLOY_ENABLED == 'true'
     steps:
       - name: Send success email
         if: needs.health-check.result == 'success'
@@ -365,9 +400,8 @@ jobs:
             Commit: ${{ github.sha }}
             Branch: ${{ github.ref_name }}
             By: ${{ github.actor }}
-            
-            App: http://${{ secrets.EC2_HOST }}:30080
-            Grafana: http://${{ secrets.EC2_HOST }}:30300
+
+            App: http://${{ needs.deploy.outputs.alb_hostname }}
           to: ${{ secrets.NOTIFY_EMAIL }}
           from: "Helpdesk CI/CD <${{ secrets.EMAIL_USERNAME }}>"
 
@@ -386,7 +420,51 @@ jobs:
             Commit: ${{ github.sha }}
             Branch: ${{ github.ref_name }}
             By: ${{ github.actor }}
-            
+
             Check: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           to: ${{ secrets.NOTIFY_EMAIL }}
           from: "Helpdesk CI/CD <${{ secrets.EMAIL_USERNAME }}>"
+
+      - name: Slack notify - deploy success
+        if: needs.health-check.result == 'success' && secrets.SLACK_WEBHOOK_URL != ''
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": ":white_check_mark: *Helpdesk deployed* — <https://github.com/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}> on `${{ github.ref_name }}` by ${{ github.actor }}\nApp: http://${{ needs.deploy.outputs.alb_hostname }}"
+            }
+
+      - name: Slack notify - deploy failure
+        if: needs.health-check.result == 'failure' && secrets.SLACK_WEBHOOK_URL != ''
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": ":x: *Helpdesk deploy FAILED* — <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|run ${{ github.run_id }}> on `${{ github.ref_name }}` by ${{ github.actor }}"
+            }
+
+  # ============================================
+  # JOB 8: Notify PR pipeline result (Slack)
+  # ============================================
+  # Runs on every PR regardless of EKS_DEPLOY_ENABLED — deploy/health-check/notify only
+  # ever run on a push to main, so without this, a PR's test/Sonar/Trivy failures would
+  # otherwise notify nobody.
+  notify-pr:
+    name: "💬 Notify PR Pipeline Result"
+    runs-on: ubuntu-latest
+    needs: [test-backend, test-frontend, trivy-source-scan]
+    if: always() && github.event_name == 'pull_request' && secrets.SLACK_WEBHOOK_URL != ''
+    steps:
+      - name: Slack notify - PR pipeline result
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "${{ contains(needs.*.result, 'failure') && ':x: PR checks failed' || ':white_check_mark: PR checks passed' }} — <${{ github.event.pull_request.html_url }}|#${{ github.event.pull_request.number }} ${{ github.event.pull_request.title }}> by ${{ github.actor }}"
+            }
