@@ -1,0 +1,33 @@
+# Separate Ingress in the monitoring namespace (Ingress backend Services must be in
+# the same namespace as the Ingress itself — Grafana's Service lives in "monitoring",
+# helpdesk-ingress.yaml's backend/frontend Services live in "helpdesk"). Shares the
+# same physical ALB as helpdesk-ingress via group.name, so this doesn't provision a
+# second load balancer.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana-ingress
+  namespace: monitoring
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /grafana/login
+    alb.ingress.kubernetes.io/group.name: helpdesk
+    # Lower than helpdesk-ingress.yaml's "20" — /grafana must be matched before
+    # helpdesk-ingress's "/" catch-all would otherwise shadow it.
+    alb.ingress.kubernetes.io/group.order: "10"
+spec:
+  rules:
+    - http:
+        paths:
+          # Service name is the chart's default for the "kube-prometheus-stack"
+          # release name (infra/terraform/monitoring.tf) — the grafana subchart's
+          # own naming isn't affected by the umbrella chart's fullnameOverride.
+          - path: /grafana
+            pathType: Prefix
+            backend:
+              service:
+                name: kube-prometheus-stack-grafana
+                port:
+                  number: 80

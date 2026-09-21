@@ -8,6 +8,16 @@ metadata:
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/healthcheck-path: /api/health/
+    # Shares one physical ALB with the Grafana Ingress (ingress-grafana.yaml, in the
+    # monitoring namespace) via AWS Load Balancer Controller's IngressGroup feature
+    # — a single Ingress resource's backend Services must live in its own
+    # namespace, so Grafana (in "monitoring") needs its own Ingress object, but
+    # group.name merges both into one ALB instead of paying for two.
+    # group.order: lower runs first. This Ingress's catch-all "/" must lose to
+    # both /api (its own, listed first) and Grafana's more specific /grafana, so
+    # it gets the higher (later) order.
+    alb.ingress.kubernetes.io/group.name: helpdesk
+    alb.ingress.kubernetes.io/group.order: "20"
 spec:
   rules:
     - http:

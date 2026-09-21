@@ -1,10 +1,19 @@
-namespace: helpdesk
+# No top-level `namespace:` transform here on purpose — every resource in this
+# overlay (and in ../base) already declares its own `metadata.namespace` explicitly
+# (helpdesk or monitoring). A top-level namespace transform would stamp ALL of them
+# with one namespace, which would break the monitoring-namespace resources below.
+# (The "monitoring" namespace itself is created by Terraform — infra/terraform/
+# monitoring.tf's kubernetes_namespace.monitoring — not by this overlay; "helpdesk"
+# is declared in ../base/all-in-one.yaml.)
 
 resources:
   - ../base
   - ingress.yaml
   - secretstore.yaml
   - externalsecret-helpdesk.yaml
+  - externalsecret-grafana.yaml
+  - externalsecret-alertmanager-slack.yaml
+  - ingress-grafana.yaml
   # Uncomment for PRIVATE Docker Hub repos only (see externalsecret-dockerhub.yaml):
   # - externalsecret-dockerhub.yaml
 
