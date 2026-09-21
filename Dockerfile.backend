@@ -1,21 +1,44 @@
-FROM python:3.11-slim
-
+# ---- builder ----
+FROM python:3.11-slim-bookworm AS builder
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y gcc libffi-dev && rm -rf /var/lib/apt/lists/*
+# Build deps for Pillow (jpeg/zlib) and simplejwt's crypto deps (libffi)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gcc libffi-dev libjpeg-dev zlib1g-dev && \
+    rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Installed as a plain --target dir, not a venv: a venv's interpreter symlinks/shebangs
+# point at paths that don't exist in the distroless runtime stage below. Copying a plain
+# site-packages dir and pointing the DISTROLESS image's own python3 at it via PYTHONPATH
+# avoids that mismatch. Base image is pinned to -bookworm (Debian 12) specifically to
+# match gcr.io/distroless/python3-debian12's glibc ABI, so the C extensions built here
+# (Pillow, etc.) are binary-compatible with the runtime stage.
+RUN pip install --no-cache-dir --target=/deps -r requirements.txt
 
 COPY backend/ .
 
 RUN mkdir -p /app/data /app/media /app/staticfiles && \
     touch /app/data/helpdesk.log
 
+ENV PYTHONPATH=/deps
 # Generate migration files at build time
 RUN python manage.py makemigrations accounts tickets notifications integrations reports settings_manager --noinput
+RUN python manage.py collectstatic --noinput
+
+# ---- runtime (distroless, non-root, no shell/package manager) ----
+FROM gcr.io/distroless/python3-debian12:nonroot AS runtime
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/deps
+
+COPY --from=builder --chown=nonroot:nonroot /deps /deps
+COPY --from=builder --chown=nonroot:nonroot /app /app
 
 EXPOSE 8000
+ENTRYPOINT ["python3", "-m", "gunicorn"]
+CMD ["helpdesk.wsgi:application", "--bind=0.0.0.0:8000", "--workers=3", "--threads=2", "--timeout=120", "--access-logfile=-"]
