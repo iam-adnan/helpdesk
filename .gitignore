@@ -1,1 +1,28 @@
 .terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+.terraform.lock.hcl
+
+# Python
+__pycache__/
+*.pyc
+backend/data/
+backend/staticfiles/
+backend/media/
+*.sqlite3
+.coverage
+coverage.xml
+htmlcov/
+
+# Node
+node_modules/
+frontend/.next/
+frontend/coverage/
+frontend/next-env.d.ts
+
+# Env
+.env
+.env.local
+.env.*.local
