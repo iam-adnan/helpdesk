@@ -111,8 +111,14 @@ locals {
             name = "slack"
             slack_configs = [
               {
-                api_url_file  = "/etc/alertmanager/secrets/alertmanager-slack-webhook/slack_url"
-                channel       = "#alerts"
+                api_url_file = "/etc/alertmanager/secrets/alertmanager-slack-webhook/slack_url"
+                # No `channel` override here on purpose: a Slack app's Incoming Webhook
+                # is bound to one fixed channel, chosen when the webhook is generated
+                # (Slack Apps -> Incoming Webhooks -> Add New Webhook to Workspace ->
+                # pick a channel) — the `channel` field in the payload is ignored for
+                # this kind of webhook, unlike the deprecated workspace-wide "custom
+                # integration" webhooks that used to honor it. Whatever channel you
+                # picked when creating the webhook is where these alerts land.
                 send_resolved = true
                 title         = "{{ .CommonAnnotations.summary }}"
                 text          = "{{ range .Alerts }}{{ .Annotations.description }}\n{{ end }}"
