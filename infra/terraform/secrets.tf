@@ -46,3 +46,35 @@ resource "aws_secretsmanager_secret_version" "dockerhub_credentials" {
     password = var.dockerhub_token
   })
 }
+
+# ---- Monitoring stack secrets (kube-prometheus-stack, see monitoring.tf) ----
+
+resource "random_password" "grafana_admin_password" {
+  length  = 24
+  special = false # kept alphanumeric so it's easy to paste into a browser login form
+}
+
+resource "aws_secretsmanager_secret" "grafana_admin_password" {
+  name        = "helpdesk/grafana-admin-password"
+  description = "Grafana admin password — synced into the monitoring namespace by External Secrets Operator. Username is fixed as 'admin' (see externalsecret-grafana.yaml)."
+}
+
+resource "aws_secretsmanager_secret_version" "grafana_admin_password" {
+  secret_id     = aws_secretsmanager_secret.grafana_admin_password.id
+  secret_string = random_password.grafana_admin_password.result
+}
+
+# Same webhook URL the GitHub Actions pipeline already uses for deploy-result
+# notifications (as the SLACK_WEBHOOK_URL GitHub secret) — stored here too so
+# Alertmanager can post RUNTIME failure alerts (pod crash loops, node not ready,
+# high resource usage) to the same Slack channel. Two different delivery paths,
+# same destination.
+resource "aws_secretsmanager_secret" "slack_webhook_url" {
+  name        = "helpdesk/slack-webhook-url"
+  description = "Slack Incoming Webhook URL for Alertmanager's runtime-failure notifications."
+}
+
+resource "aws_secretsmanager_secret_version" "slack_webhook_url" {
+  secret_id     = aws_secretsmanager_secret.slack_webhook_url.id
+  secret_string = var.slack_webhook_url
+}

@@ -50,6 +50,8 @@ data "aws_iam_policy_document" "external_secrets_read" {
       aws_secretsmanager_secret.django_secret_key.arn,
       aws_secretsmanager_secret.cors_allowed_origins.arn,
       aws_secretsmanager_secret.dockerhub_credentials.arn,
+      aws_secretsmanager_secret.grafana_admin_password.arn,
+      aws_secretsmanager_secret.slack_webhook_url.arn,
     ]
   }
 }

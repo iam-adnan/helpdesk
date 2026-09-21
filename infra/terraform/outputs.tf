@@ -33,12 +33,19 @@ output "external_secrets_role_arn" {
 
 output "secrets_manager_secret_arns" {
   value = {
-    django_secret_key     = aws_secretsmanager_secret.django_secret_key.arn
-    cors_allowed_origins  = aws_secretsmanager_secret.cors_allowed_origins.arn
-    dockerhub_credentials = aws_secretsmanager_secret.dockerhub_credentials.arn
+    django_secret_key      = aws_secretsmanager_secret.django_secret_key.arn
+    cors_allowed_origins   = aws_secretsmanager_secret.cors_allowed_origins.arn
+    dockerhub_credentials  = aws_secretsmanager_secret.dockerhub_credentials.arn
+    grafana_admin_password = aws_secretsmanager_secret.grafana_admin_password.arn
+    slack_webhook_url      = aws_secretsmanager_secret.slack_webhook_url.arn
   }
 }
 
 output "kubeconfig_command" {
   value = "aws eks update-kubeconfig --name ${module.eks.cluster_name} --region ${var.aws_region}"
+}
+
+output "grafana_url" {
+  description = "Once the ALB Ingress has a hostname (kubectl -n helpdesk get ingress helpdesk-ingress), Grafana is at http://<that-hostname>/grafana — login is 'admin' + `aws secretsmanager get-secret-value --secret-id helpdesk/grafana-admin-password --query SecretString --output text`."
+  value       = "http://${var.grafana_domain}/grafana"
 }

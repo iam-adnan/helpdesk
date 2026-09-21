@@ -23,9 +23,9 @@ variable "enable_nat_gateway" {
 }
 
 variable "node_instance_types" {
-  description = "Worker node instance type(s). Bump to t3.medium if the six app pods + system add-on pods don't all schedule on 2x t3.small."
+  description = "Worker node instance type(s). Defaults to t3.medium (not t3.small) because the monitoring stack (kube-prometheus-stack: Prometheus, Grafana, Alertmanager, kube-state-metrics, a node-exporter DaemonSet) adds roughly another 0.5-0.7 vCPU / 1-1.5Gi of pod requests on top of the six app pods + ALB controller/EBS CSI/External Secrets/metrics-server that were already close to filling 2x t3.small (4 vCPU/4Gi total, minus per-node kubelet/system reservations). t3.medium (2 vCPU/4Gi each) gives real headroom instead of scheduling right at the edge. Extra cost over t3.small is a few dollars/month on Spot — trivial against the $200 credit for a cluster meant to be destroyed between sessions anyway."
   type        = list(string)
-  default     = ["t3.small"]
+  default     = ["t3.medium"]
 }
 
 variable "node_desired_size" {
@@ -57,4 +57,17 @@ variable "cors_allowed_origins" {
   description = "Value for the app's CORS_ALLOWED_ORIGINS runtime secret. Circular on a fresh cluster (the ALB hostname doesn't exist until after apply) — leave the default on first apply, then update via `terraform apply -var cors_allowed_origins=http://<alb-hostname>` once Task 6/11's Ingress has a real ADDRESS, or set it once a real domain is in front of the ALB."
   type        = string
   default     = "http://localhost:3000,http://localhost"
+}
+
+variable "slack_webhook_url" {
+  description = "Slack Incoming Webhook URL, stored in AWS Secrets Manager and synced into the cluster for Alertmanager (runtime failure alerts: pod crash loops, node not ready, high resource usage, etc. — separate from the deploy-result Slack notification already sent directly from the GitHub Actions pipeline via the SLACK_WEBHOOK_URL GitHub secret). Reusing the same webhook URL for both is fine — set the same value here as `gh secret set SLACK_WEBHOOK_URL`. Pass via TF_VAR_slack_webhook_url or terraform.tfvars (gitignored), never commit a real value."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "grafana_domain" {
+  description = "Hostname Grafana is served under (the ALB's DNS name, or a real domain once one is in front of it) — needed for Grafana's root_url/serve_from_sub_path config since it's routed through the same ALB at the /grafana path rather than getting its own load balancer. Circular on a fresh cluster like cors_allowed_origins above; update after first apply once the ALB hostname is known."
+  type        = string
+  default     = "localhost"
 }
