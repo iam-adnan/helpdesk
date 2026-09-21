@@ -24,3 +24,12 @@ npm test -- --coverage
 EKS deployment infrastructure (Terraform) lives in `infra/terraform/`. See
 `docs/superpowers/plans/2026-09-21-aws-eks-migration.md` for the full process,
 cost plan, and tool list.
+
+## Monitoring
+
+Prometheus + Grafana + Alertmanager (`kube-prometheus-stack`) once deployed:
+- Grafana: `http://<alb-hostname>/grafana`, user `admin`, password from
+  `aws secretsmanager get-secret-value --secret-id helpdesk/grafana-admin-password --query SecretString --output text`
+- Alertmanager posts runtime failures (pod crash loops, node not ready, high
+  resource usage) to Slack — separate from the CI pipeline's own deploy-result
+  Slack notification, same webhook/channel.

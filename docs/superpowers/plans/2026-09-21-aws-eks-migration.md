@@ -20,6 +20,18 @@
 > Dockerfiles are now distroless multi-stage builds (see `Dockerfile.backend`/
 > `Dockerfile.frontend` and `docker-compose.yml`'s `target: builder` local-dev override).
 > The task-by-task detail below is otherwise still accurate and was used as-is.
+>
+> **Second amendment (same date):** monitoring added — `kube-prometheus-stack`
+> (Prometheus + Grafana + Alertmanager + kube-state-metrics + node-exporter) via
+> `infra/terraform/monitoring.tf`, Grafana routed through the *same* ALB as the app
+> (no second load balancer — see the IngressGroup note in Task 16 below), and
+> Alertmanager wired to the same Slack webhook for runtime failure alerts (crash
+> loops, node not ready, high resource usage — distinct from the CI pipeline's
+> existing deploy-result Slack notification). This pushed the default worker node
+> type from `t3.small` to `t3.medium` (see Task 16 and the updated cost table) — the
+> monitoring stack's pod requests didn't comfortably fit alongside everything else
+> on 2x t3.small. See Task 16 for the full detail; it wasn't in this doc's original
+> scope.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -72,11 +84,13 @@ Console → Billing → Credits, or `aws billingconductor` / the Billing dashboa
 
 Two very different numbers apply depending on whether the cluster is left running or torn down between sessions. **Default to the spin-up/destroy pattern** — everything in this plan is built with Terraform specifically so that's a two-command operation (`terraform apply` / `terraform destroy`), not a manual teardown checklist you'll forget to run.
 
-| Scenario | EKS control plane | Worker nodes (2× t3.small) | NAT Gateway | ALB | EBS + ECR | **Total** |
+| Scenario | EKS control plane | Worker nodes (2× t3.medium — see Task 16's node-sizing note) | NAT Gateway | ALB (shared with Grafana via IngressGroup, still one ALB) | EBS (app + Prometheus's 10Gi) + ECR | **Total** |
 |---|---|---|---|---|---|---|
-| **Left running 24/7, on-demand nodes, with NAT** | $73.00/mo | $30.37/mo | ~$33–43/mo (incl. data processing) | ~$18–22/mo | ~$2/mo | **~$156–170/mo → drains $200 in ~5 weeks** |
-| **Left running 24/7, Spot nodes, no NAT** (nodes in public subnet, tight SG) | $73.00/mo | ~$7–9/mo | $0 | ~$18–22/mo | ~$2/mo | **~$100–106/mo → drains $200 in ~8 weeks** |
-| **Spin-up/destroy, ~40 hrs total hands-on time, Spot nodes, mostly no NAT** | $4.00 (40hr × $0.10) | ~$0.50 | ~$0.35 (only during the 1–2 sessions you test the "with NAT" pattern) | ~$0.90 + minor LCU | ~$0.50 | **~$6–10 for the entire exercise** |
+| **Left running 24/7, on-demand nodes, with NAT** | $73.00/mo | $60.74/mo | ~$33–43/mo (incl. data processing) | ~$18–22/mo | ~$2.80/mo | **~$188–202/mo → drains $200 in ~4 weeks** |
+| **Left running 24/7, Spot nodes, no NAT** (nodes in public subnet, tight SG) | $73.00/mo | ~$12–18/mo | $0 | ~$18–22/mo | ~$2.80/mo | **~$106–116/mo → drains $200 in ~6–7 weeks** |
+| **Spin-up/destroy, ~40 hrs total hands-on time, Spot nodes, mostly no NAT** | $4.00 (40hr × $0.10) | ~$1.00 | ~$0.35 (only during the 1–2 sessions you test the "with NAT" pattern) | ~$0.90 + minor LCU | ~$0.55 | **~$7–11 for the entire exercise** |
+
+(t3.medium is ~2x t3.small's price at every tier — bumped from the original t3.small default once monitoring was added; see Task 16. The spin-up/destroy row barely moves either way — this is still the operating pattern to actually use.)
 
 The third row is the intended way to use this plan. **~40 hours of genuine hands-on EKS time (enough to do every task below, twice over, with room for mistakes) costs under $10** and leaves the other ~$190 of credit for later experimentation, a longer "showcase window" before a job interview, or just margin for error.
 
@@ -90,7 +104,7 @@ The third row is the intended way to use this plan. **~40 hours of genuine hands
 
 | Tool | Role | Cost |
 |---|---|---|
-| **Terraform** (CLI, ≥1.9) | Provisions VPC, EKS cluster, node group, IAM roles/OIDC, ECR repos — everything as versioned code you can `apply`/`destroy` on demand | Free (matches your existing Terraform Associate cert) |
+| **Terraform** (CLI, ≥1.9) | Provisions VPC, EKS cluster, node group, IAM roles/OIDC, Secrets Manager entries, and the monitoring stack — everything as versioned code you can `apply`/`destroy` on demand | Free (matches your existing Terraform Associate cert) |
 | `terraform-aws-modules/vpc/aws` | Community module for the VPC/subnets — avoids hand-rolling networking | Free |
 | `terraform-aws-modules/eks/aws` | Community module for the EKS cluster + managed node group + IRSA wiring | Free |
 | **AWS CLI v2** | `aws eks update-kubeconfig`, `aws ecr get-login-password`, ad-hoc resource checks/teardown verification | Free |
@@ -101,14 +115,17 @@ The third row is the intended way to use this plan. **~40 hours of genuine hands
 | **metrics-server** (EKS add-on or Helm chart) | Backs `kubectl top` and any HPA you experiment with later | Free |
 | **Amazon EKS** | Managed Kubernetes control plane | $0.10/hr — see cost table |
 | **EC2 managed node group (Spot)** | Worker nodes | Per-hour, Spot pricing — see cost table |
-| **Amazon ECR** | Private image registry, replaces Docker Hub for this deployment path (same-region transfer to EKS is free) | ~$0.10/GB-month storage — see cost table |
 | **Amazon VPC** | Custom networking (2 AZ, public/private subnets) | Free itself; NAT Gateway inside it is billed |
-| **IAM + OIDC (IRSA)** | Scoped permissions for the ALB Controller and EBS CSI driver pods, and a separate OIDC role for GitHub Actions (no static AWS keys in GitHub secrets) | Free |
+| **IAM + OIDC (IRSA)** | Scoped permissions for the ALB Controller, EBS CSI driver, External Secrets Operator pods, and a separate OIDC role for GitHub Actions (no static AWS keys in GitHub secrets) | Free |
+| **AWS Secrets Manager** | Source of truth for runtime secrets — Django `SECRET_KEY`, CORS origins, Grafana admin password, Slack webhook URL — nothing committed to git in plaintext | ~$0.40/secret/month + API calls, ~$2/mo total for the 5 secrets this plan creates |
+| **External Secrets Operator** | Syncs AWS Secrets Manager entries into real Kubernetes Secrets at the names the Deployments/Alertmanager/Grafana already expect | Free |
 | **AWS Budgets + CloudWatch Billing Alarm** | Spend guardrail — alerts before you approach $200 | Free |
-| **GitHub Actions** (already in use) | CI/CD orchestration — the "deploy" job changes target from SSH/EC2 to `kubectl` via OIDC | Free (public repo) or existing GH plan |
+| **GitHub Actions** (already in use) | CI/CD orchestration — the "deploy" job changes target from SSH/EC2 to `kubectl` via OIDC; registry is Docker Hub, not ECR (see the implementation-note amendment at the top of this doc) | Free (public repo) or existing GH plan |
 | **k6** | Lightweight load-testing tool for the post-deploy smoke/load test | Free, open source |
 | **tfsec** or **Checkov** | Static analysis of the Terraform for security/cost misconfigurations before `apply` | Free, open source |
 | **k9s** (optional) | Terminal UI for quickly eyeballing cluster state during testing/demos | Free, open source |
+| **kube-prometheus-stack** (Prometheus + Grafana + Alertmanager + kube-state-metrics + node-exporter) | Node health, cluster-wide stats (Grafana dashboards ship out of the box), and a large default Prometheus alerting rule set — crash loops, node-not-ready, resource pressure, etc. | Free itself; the ~10Gi EBS volume for Prometheus's TSDB is billed (already in cost table) |
+| **Slack (Alertmanager route)** | Runtime failure notifications — separate from the CI pipeline's own deploy-result Slack step, same webhook/channel | Free (Slack Incoming Webhook) |
 
 ---
 
@@ -937,11 +954,80 @@ Expected: every one of these returns an empty list. **If the ALB or an EBS volum
 - [ ] **Step 2:** Wait for the next billing/usage refresh (budget alerts typically evaluate a few times a day, not instantly — this may take several hours) and confirm the alert email actually arrives.
 - [ ] **Step 3:** Delete the $1 test budget once confirmed; leave the real $180 one from Task 0 in place permanently.
 
+### Task 16: Monitoring — Prometheus, Grafana, Alertmanager (added after this doc's original scope)
+
+**Files (already written, this task is verification/first-use, not authoring):**
+- `infra/terraform/monitoring.tf` — `kube-prometheus-stack` Helm release
+- `infra/terraform/secrets.tf` — `grafana_admin_password` (generated), `slack_webhook_url` (from `var.slack_webhook_url`)
+- `k8s/eks/externalsecret-grafana.yaml`, `k8s/eks/externalsecret-alertmanager-slack.yaml`
+- `k8s/eks/ingress-grafana.yaml` — Grafana's own Ingress (a separate Kubernetes object is required since Ingress backend Services must live in the same namespace as the Ingress itself, and Grafana's Service is in `monitoring` while the app's is in `helpdesk`), sharing the **same physical ALB** as `k8s/eks/ingress.yaml` via `alb.ingress.kubernetes.io/group.name: helpdesk` — this does **not** provision a second load balancer.
+
+**Interfaces:**
+- Consumes: `module.eks` (Task 3), `aws_eks_addon.ebs_csi`/`kubernetes_storage_class.gp3` (Task 5, for Prometheus's PVC), `module.external_secrets_irsa` (extended in `irsa.tf` to read the two new secret ARNs).
+- Produces: Grafana reachable at `http://<alb-hostname>/grafana`; Alertmanager posting to the Slack channel the webhook points at.
+
+- [ ] **Step 1: Set the Slack webhook variable before applying**
+
+```bash
+export TF_VAR_slack_webhook_url="https://hooks.slack.com/services/XXX/YYY/ZZZ"
+```
+
+Same value as `gh secret set SLACK_WEBHOOK_URL` from Task 12 — one webhook, two delivery paths (CI pipeline deploy-result notifications vs. Alertmanager runtime-failure notifications).
+
+- [ ] **Step 2: Apply, then wire up ExternalSecrets, in the order that avoids any wait**
+
+```bash
+cd infra/terraform
+terraform apply   # creates the AWS secrets, IRSA, and the kube-prometheus-stack Helm release itself
+kubectl apply -k ../../k8s/eks/   # creates the ExternalSecrets that populate grafana-admin-credentials / alertmanager-slack-webhook
+```
+
+If you apply Terraform without the `kubectl apply -k` step run yet (or before the ExternalSecrets exist for any other reason), the Grafana/Alertmanager pods will just sit retrying `FailedMount` until the secrets show up — self-healing, no restart needed, but worth doing in this order so you're not waiting on it.
+
+- [ ] **Step 3: Confirm the monitoring stack is healthy**
+
+```bash
+kubectl -n monitoring get pods
+```
+
+Expected: `kube-prometheus-stack-grafana`, `alertmanager-kube-prometheus-stack-alertmanager-0`, `prometheus-kube-prometheus-stack-prometheus-0`, `kube-prometheus-stack-kube-state-metrics`, `kube-prometheus-stack-operator`, and one `kube-prometheus-stack-prometheus-node-exporter` pod per node — all `Running`.
+
+- [ ] **Step 4: Confirm Grafana loads through the shared ALB**
+
+```bash
+HOSTNAME=$(kubectl -n helpdesk get ingress helpdesk-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+curl -sI "http://$HOSTNAME/grafana/login" | head -1
+```
+
+Expected: `HTTP/1.1 200`. Log in with username `admin` and the password from `aws secretsmanager get-secret-value --secret-id helpdesk/grafana-admin-password --query SecretString --output text` — the default "Kubernetes / Compute Resources / Node (Pods)" and "Node Exporter / Nodes" dashboards (ships with the chart, no manual import needed) should already show live data for both nodes.
+
+- [ ] **Step 5: Update `grafana_domain` now that the ALB hostname is known**
+
+```bash
+terraform apply -var grafana_domain="$HOSTNAME"
+```
+
+(Was left at the `localhost` default in Task 16 Step 1/2 — same circularity as `cors_allowed_origins` in the Global Constraints. Without this, links inside Grafana's UI will point at the wrong host.)
+
+- [ ] **Step 6: Verify Alertmanager actually reaches Slack — trigger a real alert**
+
+```bash
+kubectl -n helpdesk run crashloop-test --image=busybox --restart=Always -- sh -c "exit 1"
+```
+
+Expected: within a few minutes, `KubePodCrashLooping` fires (one of the chart's default rules) and a message lands in the Slack channel the webhook points at. Clean up afterward:
+
+```bash
+kubectl -n helpdesk delete pod crashloop-test
+```
+
+- [ ] **Step 7: Confirm the crashloop test pod's resolution also notifies Slack** (the receiver config sets `send_resolved: true`) — after Step 6's delete, expect a second Slack message noting the alert resolved. If it doesn't arrive within `group_interval` (5m per `monitoring.tf`'s config), check `kubectl -n monitoring logs -l app.kubernetes.io/name=alertmanager` for delivery errors (most likely cause: `alertmanager-slack-webhook`'s `slack_url` key doesn't match what Step 2 actually synced — re-check `externalsecret-alertmanager-slack.yaml`'s `secretKey` against `monitoring.tf`'s `api_url_file` path, they must agree exactly).
+
 ---
 
 ## Self-Review Notes
 
-- **Spec coverage:** "whole process" → Tasks 1–8 (IAM bootstrap through CI/CD rewire). "testing" → Tasks 9–15 (infra validation, cluster/app smoke tests, load test, failure injection, teardown verification, budget-alert test). "AWS plan we can use in our account" → the Cost Plan table + Global Constraints section, grounded in current (2026) pricing with sources cited inline. "list of all the tools" → the Tool List table.
+- **Spec coverage:** "whole process" → Tasks 1–8 (IAM bootstrap through CI/CD rewire). "testing" → Tasks 9–15 (infra validation, cluster/app smoke tests, load test, failure injection, teardown verification, budget-alert test). "AWS plan we can use in our account" → the Cost Plan table + Global Constraints section, grounded in current (2026) pricing with sources cited inline. "list of all the tools" → the Tool List table. "Grafana/Prometheus for node health and stats, Slack for failure/deployment notifications" (added after the doc's original scope) → Task 16 for Prometheus/Grafana/Alertmanager; deployment-event Slack notifications were already covered by Task 12's CI pipeline `notify`/`notify-pr` jobs — Task 16 adds the separate runtime-failure path (Alertmanager -> Slack) rather than duplicating what CI already does.
 - **Verification pass completed during planning, not left as an assumption:** `grep -n "image:"` and the `kind: Service` blocks in `k8s/all-in-one.yaml` were both read directly. Confirmed: `backend`/`frontend` Service ports are `8000`/`3000` (used as-is in Task 6's `Ingress`), and every backend-family Deployment (`backend`, `celery`, `slack-bot`) uses the literal token `BACKEND_IMAGE_PLACEHOLDER` while `frontend` uses `FRONTEND_IMAGE_PLACEHOLDER` — these are pre-existing substitution tokens the old k3s `sed`/`kubectl set image` deploy step filled in, not real Docker Hub refs, so Task 6/8's Kustomize `images:` block targets those exact strings rather than a guessed `DOCKERHUB_USERNAME/...` name.
 - **Deliberately out of scope:** migrating off SQLite to RDS (mentioned only as a Task 0 credit-farming step, not a real dependency change — the app keeps using SQLite-on-EBS exactly as it does on k3s today), Karpenter/cluster-autoscaler (the fixed 2-node group is intentionally simple for a budget-capped learning cluster), multi-environment (dev/staging/prod) clusters (each additional cluster is another fixed $73/mo control-plane fee — not worth it inside a $200 one-time credit), and a custom domain/ACM certificate for HTTPS on the ALB (the ALB's default DNS name over HTTP is sufficient for testing; adding a Route53 hosted zone + ACM cert is a cheap but not-strictly-necessary follow-up once a domain is available).
 - **Portfolio note:** this plan was deliberately built with Terraform (not `eksctl`/console clicks) and OIDC-federated CI (not static AWS keys) specifically because those are the patterns that show up in cloud/DevOps interview screens — worth calling out explicitly in a resume/portfolio writeup once this is running: "Provisioned and tore down an EKS cluster via Terraform, wired GitHub Actions to deploy via IAM OIDC federation with zero long-lived credentials, and operated it under a hard cost budget using AWS Budgets alerts."
