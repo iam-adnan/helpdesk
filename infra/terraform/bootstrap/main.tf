@@ -28,9 +28,13 @@ data "aws_caller_identity" "current" {}
 resource "aws_iam_user" "terraform" {
   name = var.terraform_user_name
 
+  # IAM tag values accept ONLY [\p{L}\p{Z}\p{N}_.:/=+\-@] — letters, spaces, digits and
+  # _ . : / = + - @. Nothing else. Two live CreateUser ValidationErrors were spent
+  # learning this: first an em-dash, then the comma that replaced it. A comma is not on
+  # the list either. Keep tag values to words, spaces and hyphens; prose goes in comments.
   tags = {
     Project = var.cluster_name
-    Purpose = "Terraform execution identity — replaces the account root for day-to-day applies"
+    Purpose = "Terraform execution identity - replaces account root for day-to-day applies"
   }
 }
 
