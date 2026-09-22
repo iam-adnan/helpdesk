@@ -83,6 +83,10 @@ resource "aws_eks_access_entry" "github_deploy" {
   principal_arn = aws_iam_role.github_deploy.arn
   type          = "STANDARD"
 
+  # Puts the CI principal in a Kubernetes group so a ClusterRole can grant it the few
+  # cluster-scoped verbs it needs (below) without resorting to cluster-admin.
+  kubernetes_groups = ["helpdesk-ci"]
+
   depends_on = [module.eks]
 }
 
@@ -92,9 +96,53 @@ resource "aws_eks_access_policy_association" "github_deploy" {
   policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy"
 
   access_scope {
-    type       = "namespace"
-    namespaces = ["helpdesk"]
+    type = "namespace"
+    # "monitoring" as well as "helpdesk": the k8s/eks overlay the deploy job applies
+    # contains the Grafana Ingress and two ExternalSecrets that live in monitoring, so a
+    # helpdesk-only scope failed the whole `kubectl apply -k` with Forbidden — even
+    # though every app resource had already applied cleanly.
+    namespaces = ["helpdesk", "monitoring"]
   }
 
   depends_on = [aws_eks_access_entry.github_deploy]
+}
+
+# AmazonEKSEditPolicy is namespace-scoped and covers only built-in API groups, so it
+# grants nothing on external-secrets.io CRDs and nothing cluster-wide. Rather than
+# promoting CI to cluster-admin, this grants exactly the resources the overlay contains.
+resource "kubernetes_cluster_role" "ci_external_secrets" {
+  metadata {
+    name = "helpdesk-ci-external-secrets"
+  }
+
+  # ClusterSecretStore is cluster-scoped, so it cannot be reached by any namespace-scoped
+  # grant at all — this rule is the only thing that makes `kubectl apply` of
+  # k8s/eks/secretstore.yaml possible from CI.
+  rule {
+    api_groups = ["external-secrets.io"]
+    resources  = ["clustersecretstores", "externalsecrets", "secretstores"]
+    verbs      = ["get", "list", "watch", "create", "update", "patch"]
+  }
+
+  depends_on = [module.eks]
+}
+
+resource "kubernetes_cluster_role_binding" "ci_external_secrets" {
+  metadata {
+    name = "helpdesk-ci-external-secrets"
+  }
+
+  role_ref {
+    api_group = "rbac.authorization.k8s.io"
+    kind      = "ClusterRole"
+    name      = kubernetes_cluster_role.ci_external_secrets.metadata[0].name
+  }
+
+  subject {
+    api_group = "rbac.authorization.k8s.io"
+    kind      = "Group"
+    name      = "helpdesk-ci" # matches kubernetes_groups on the access entry above
+  }
+
+  depends_on = [module.eks]
 }
