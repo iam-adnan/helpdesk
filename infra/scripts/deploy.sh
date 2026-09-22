@@ -142,7 +142,41 @@ aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION" --profile "$A
 
 echo
 echo "==> kubectl apply -k k8s/eks/"
+
+# The manifests carry BACKEND_IMAGE_PLACEHOLDER / FRONTEND_IMAGE_PLACEHOLDER, which CI
+# replaces with `kubectl set image` AFTER applying. That ordering is fine in CI, but it
+# means re-running this script against a cluster that is already serving traffic would
+# reset every Deployment back to an invalid image and take the site down —
+# InvalidImageName, no rollback, until someone re-sets them by hand.
+#
+# So: capture whatever real images are deployed now, apply, then put them back. On a
+# first deploy there is nothing to capture and this is a no-op.
+declare -A PREV_IMAGES
+for d in backend celery frontend slack-bot; do
+  img=$(kubectl -n helpdesk get deploy "$d" \
+    -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+  case "$img" in
+    ""|*PLACEHOLDER*) ;;                       # absent, or never deployed for real
+    *) PREV_IMAGES["$d"]="$img" ;;
+  esac
+done
+
 kubectl apply -k "${REPO_ROOT}/k8s/eks/" 2>&1 | tee "$LOG_FILE" || fail "kubectl apply"
+
+if [ ${#PREV_IMAGES[@]} -gt 0 ]; then
+  echo "    restoring ${#PREV_IMAGES[@]} live image(s) the apply reset to placeholders"
+  for d in "${!PREV_IMAGES[@]}"; do
+    img="${PREV_IMAGES[$d]}"
+    if [ "$d" = "backend" ]; then
+      # `set image` matches by container NAME, and backend has an initContainer
+      # (migrate) running the same image — miss it and the pod never leaves Init.
+      kubectl -n helpdesk set image "deployment/$d" "migrate=$img" "backend=$img" >/dev/null
+    else
+      kubectl -n helpdesk set image "deployment/$d" "$d=$img" >/dev/null
+    fi
+    echo "      $d -> $img"
+  done
+fi
 
 # The Deployments reference BACKEND_IMAGE_PLACEHOLDER / FRONTEND_IMAGE_PLACEHOLDER until
 # CI substitutes real tags via `kubectl set image`. On a first deploy, before the

@@ -7,6 +7,15 @@ django-celery-beat==2.6.0
 gunicorn==22.0.0
 celery==5.4.0
 redis==5.0.4
+# redis 5.x declares async-timeout only for python_full_version < "3.11.3", and pip
+# evaluates that marker against the BUILDER interpreter. Dockerfile.backend builds on
+# python:3.11-slim-bookworm (3.11.13, marker false -> skipped) but runs on
+# gcr.io/distroless/python3-debian12 (3.11.2, marker true -> required), so the package
+# was silently missing at runtime. kombu then sets `redis = None` on a failed import and
+# every celery/slack-bot pod died with:
+#   AttributeError: 'NoneType' object has no attribute 'Redis'
+# Pinned explicitly so it is installed regardless of which interpreter resolves the marker.
+async-timeout>=4.0.3
 Pillow==10.3.0
 anthropic==0.25.0
 slack-sdk==3.27.1
