@@ -167,9 +167,10 @@ resource "helm_release" "ingress_nginx" {
   wait    = true
   timeout = 600
 
+  # No dependency on the Elastic IP any more: it is owned by the bootstrap stack and
+  # merely read here, so it already exists before this stack runs at all.
   depends_on = [
     module.eks,
     helm_release.aws_load_balancer_controller,
-    aws_eip.ingress,
   ]
 }

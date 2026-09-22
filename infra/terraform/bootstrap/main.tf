@@ -156,7 +156,37 @@ resource "aws_iam_role_policy_attachment" "github_infra_admin" {
 }
 
 # ---------------------------------------------------------------------------
-# 4. Cost guardrail
+# 4. The site's static IP
+# ---------------------------------------------------------------------------
+#
+# Lives here, not in the main stack, so `terraform destroy` of the cluster does NOT
+# release it. Previously it was a main-stack resource, which meant every teardown handed
+# the address back to AWS and the next apply came up on a different one — fine for a
+# throwaway cluster, useless the moment anything points at it (a DNS record, a firewall
+# allowlist, a link you gave someone).
+#
+# The main stack finds it by tag (a data source in static_ip.tf) rather than through a
+# remote-state reference, so the two stacks stay decoupled: bootstrap does not need to
+# know the cluster exists, and the cluster does not need to read bootstrap's state.
+#
+# Cost while no cluster is running: ~$0.005/hr (~$3.60/mo) for an idle allocated address.
+# That is the price of keeping the address stable; release it by hand if a teardown is
+# meant to be permanent.
+resource "aws_eip" "ingress" {
+  count  = var.ingress_eip_count
+  domain = "vpc"
+
+  tags = {
+    Name    = "${var.cluster_name}-ingress-${count.index}"
+    Project = var.cluster_name
+    # Read by .github/workflows/cicd.yml to resolve the site address without needing
+    # access to Terraform state.
+    Role = "ingress-static-ip"
+  }
+}
+
+# ---------------------------------------------------------------------------
+# 5. Cost guardrail
 # ---------------------------------------------------------------------------
 
 # Separate from, and much lower than, the pre-existing "helpdesk-eks-guardrail" budget

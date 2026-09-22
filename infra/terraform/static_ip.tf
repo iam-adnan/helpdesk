@@ -1,25 +1,28 @@
 # The static IP the site is served on.
 #
-# Why this exists at all: the AWS Load Balancer Controller provisions an ALB from the
-# Ingress resources in k8s/eks/, and an ALB has NO static IP — AWS exposes it only as a
-# DNS name whose addresses rotate. Elastic IP attachment is supported on Network Load
-# Balancers only. So the load balancer type had to change; see the design doc §4.
+# Known at PLAN time — before the cluster, before any pod — which is what lets
+# cors_allowed_origins and Grafana's root_url be computed in a single apply instead of
+# the two-phase "apply, read the load balancer hostname, apply again" dance the original
+# design required.
 #
-# The addresses are allocated by Terraform, which means they are known at PLAN time —
-# before the cluster, before any pod. That is what lets cors_allowed_origins and
-# grafana_domain be computed in a single apply instead of the two-phase
-# "apply, read the ALB hostname, apply again" dance the old variables.tf described.
+# There is no load balancer at all in the end: AWS rejects CreateLoadBalancer on this
+# account, so the address is attached straight to a worker node and ingress-nginx runs as
+# a hostNetwork DaemonSet (see below and addons.tf).
 
-resource "aws_eip" "ingress" {
-  count  = var.nlb_az_count
-  domain = "vpc"
+# The address is OWNED by the bootstrap stack (infra/terraform/bootstrap/main.tf) and
+# only READ here, so `terraform destroy` of this stack releases the association but keeps
+# the address itself. It used to be a resource in this stack, which meant every teardown
+# returned it to AWS and the rebuild came up on a different IP — unusable for anything
+# that has to keep pointing at it.
+#
+# Discovered by tag rather than via a remote-state data source, so the two stacks share
+# only a naming convention and neither needs to read the other's state.
+data "aws_eip" "ingress" {
+  count = var.nlb_az_count
 
-  tags = {
-    Name    = "${var.cluster_name}-ingress-${count.index}"
-    Project = "helpdesk-eks"
-    # Read by .github/workflows/cicd.yml to find the site address without needing
-    # access to Terraform state or outputs.
-    Role = "ingress-static-ip"
+  filter {
+    name   = "tag:Name"
+    values = ["${var.cluster_name}-ingress-${count.index}"]
   }
 }
 
@@ -66,7 +69,7 @@ data "aws_network_interface" "node_primary" {
 }
 
 resource "aws_eip_association" "ingress" {
-  allocation_id        = aws_eip.ingress[0].id
+  allocation_id        = data.aws_eip.ingress[0].id
   network_interface_id = data.aws_network_interface.node_primary.id
 
   # Replaces the node's auto-assigned public IP with ours. Any node will do, since the
@@ -107,12 +110,12 @@ locals {
     var.nlb_az_count,
   )
 
-  eip_allocation_ids = join(",", aws_eip.ingress[*].id)
+  eip_allocation_ids = join(",", data.aws_eip.ingress[*].id)
 
   # The address quoted everywhere a single value is needed (Slack messages, CORS,
   # Grafana's root_url). With the default nlb_az_count = 1 this is the only address;
   # at 2 it is the first of two and the NLB's DNS name round-robins between them.
-  website_ip = aws_eip.ingress[0].public_ip
+  website_ip = data.aws_eip.ingress[0].public_ip
 
   # A real domain wins over the raw IP when one is configured, so turning on DNS/TLS
   # later is a one-variable change rather than a hunt through every reference.

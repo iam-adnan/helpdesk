@@ -33,3 +33,13 @@ output "budget_name" {
   description = "Cost guardrail created by this stack."
   value       = aws_budgets_budget.credit_guardrail.name
 }
+
+output "ingress_eips" {
+  description = "Static IPs the site is served on. These persist across cluster teardowns — the main stack attaches whichever one it finds by tag."
+  value       = aws_eip.ingress[*].public_ip
+}
+
+output "ingress_eip_allocation_ids" {
+  description = "Allocation IDs of the ingress Elastic IPs."
+  value       = aws_eip.ingress[*].id
+}

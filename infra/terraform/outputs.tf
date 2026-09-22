@@ -54,7 +54,7 @@ output "website_ip" {
 
 output "website_ips" {
   description = "Every ingress Elastic IP. Same as website_ip unless nlb_az_count = 2."
-  value       = aws_eip.ingress[*].public_ip
+  value       = data.aws_eip.ingress[*].public_ip
 }
 
 output "website_url" {

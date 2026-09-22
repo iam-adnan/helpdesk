@@ -33,3 +33,9 @@ variable "budget_notification_email" {
   type        = string
   default     = "adnan.akram@mindstormstudios.com"
 }
+
+variable "ingress_eip_count" {
+  description = "Number of Elastic IPs held for the cluster ingress. Must be >= the main stack's nlb_az_count, since that stack looks these up by tag and will fail to find one that does not exist. Held here so they survive `terraform destroy` of the cluster."
+  type        = number
+  default     = 1
+}
