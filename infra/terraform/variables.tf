@@ -23,9 +23,33 @@ variable "enable_nat_gateway" {
 }
 
 variable "node_instance_types" {
-  description = "Worker node instance type(s). Defaults to t3.medium (not t3.small) because the monitoring stack (kube-prometheus-stack: Prometheus, Grafana, Alertmanager, kube-state-metrics, a node-exporter DaemonSet) adds roughly another 0.5-0.7 vCPU / 1-1.5Gi of pod requests on top of the six app pods + ALB controller/EBS CSI/External Secrets/metrics-server that were already close to filling 2x t3.small (4 vCPU/4Gi total, minus per-node kubelet/system reservations). t3.medium (2 vCPU/4Gi each) gives real headroom instead of scheduling right at the edge. Extra cost over t3.small is a few dollars/month on Spot — trivial against the $200 credit for a cluster meant to be destroyed between sessions anyway."
+  description = <<-EOT
+    Worker node instance type(s). MUST be Free-Tier-eligible on a Free Plan account —
+    this is a hard restriction, not a billing preference. A non-eligible type is
+    rejected at launch with:
+
+      InvalidParameterCombination - The specified instance type is not eligible for
+      Free Tier.
+
+    t3.medium was the original default and is NOT eligible, which is why the node group
+    sat in CREATING with zero instances. As with the Fleet quota, the cause appears only
+    in the Auto Scaling group's scaling activities — never in the node group's health
+    issues or in Terraform's output.
+
+    Check the current list with:
+      aws ec2 describe-instance-types --filters Name=free-tier-eligible,Values=true
+
+    In us-east-1 that is m7i-flex.large (2 vCPU/8Gi), c7i-flex.large (2 vCPU/4Gi),
+    t3/t4g/t8i .small (2 vCPU/2Gi) and .micro (2 vCPU/1Gi).
+
+    c7i-flex.large is the default: 4Gi matches what t3.medium would have given, which
+    the monitoring stack (Prometheus, Grafana, Alertmanager, kube-state-metrics,
+    node-exporter) needs on top of the app pods and the four controllers. The 2Gi
+    .small types do not fit that comfortably; drop monitoring first if you switch to
+    them to save money.
+  EOT
   type        = list(string)
-  default     = ["t3.medium"]
+  default     = ["c7i-flex.large"]
 }
 
 variable "node_desired_size" {
