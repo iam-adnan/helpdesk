@@ -98,7 +98,10 @@ cd "$TF_DIR"
 
 echo
 echo "==> terraform init"
-terraform init -input=false -no-color >/dev/null
+# Same account-derived bucket as deploy.sh — see the comment in backend.tf.
+ACCOUNT_ID=$($AWSC sts get-caller-identity --query Account --output text)
+terraform init -input=false -no-color -reconfigure \
+  -backend-config="bucket=${CLUSTER}-tfstate-${ACCOUNT_ID}" >/dev/null
 
 echo
 echo "==> terraform destroy"

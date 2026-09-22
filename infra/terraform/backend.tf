@@ -14,9 +14,18 @@
 #
 # use_lockfile enables S3-native state locking (a .tflock object alongside the state).
 # No DynamoDB table is needed — that requirement went away in Terraform 1.10.
+# PARTIAL configuration — `bucket` is deliberately absent and supplied at init time by
+# infra/scripts/*.sh as:
+#
+#   terraform init -backend-config="bucket=${cluster_name}-tfstate-${account_id}"
+#
+# The bucket name embeds the AWS account ID (bucket names are globally unique), so
+# hardcoding it here silently pins the whole stack to one account. Moving to a different
+# account then points Terraform at a bucket it cannot write — or, worse, at the WRONG
+# account's state. The scripts derive the account ID from `sts get-caller-identity`, so
+# the state bucket always follows whichever credentials are actually in use.
 terraform {
   backend "s3" {
-    bucket       = "helpdesk-eks-tfstate-064271146369"
     key          = "helpdesk-eks/main.tfstate"
     region       = "us-east-1"
     encrypt      = true

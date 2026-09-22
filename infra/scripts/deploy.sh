@@ -91,7 +91,12 @@ cd "$TF_DIR"
 
 echo
 echo "==> terraform init"
-terraform init -input=false -no-color 2>&1 | tee "$LOG_FILE" || fail "terraform init"
+# Bucket is supplied here rather than in backend.tf — it embeds the account ID, so it
+# has to follow the credentials actually in use. See the comment in backend.tf.
+STATE_BUCKET="${CLUSTER}-tfstate-${ACCOUNT_ID}"
+echo "    state bucket: ${STATE_BUCKET}"
+terraform init -input=false -no-color -reconfigure \
+  -backend-config="bucket=${STATE_BUCKET}" 2>&1 | tee "$LOG_FILE" || fail "terraform init"
 
 echo
 echo "==> terraform plan"

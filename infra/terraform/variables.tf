@@ -33,6 +33,36 @@ variable "node_desired_size" {
   default = 2
 }
 
+variable "node_capacity_type" {
+  description = <<-EOT
+    SPOT or ON_DEMAND. Defaults to ON_DEMAND, which is NOT the cheap option — it is the
+    one that works on a new account.
+
+    SPOT was the original default (70-90% cheaper) and it failed against this account.
+    An EKS managed node group with capacity_type = SPOT provisions through EC2 Fleet,
+    and a new AWS account's Fleet Request quota is effectively zero, so every launch is
+    rejected with:
+
+      You've reached your quota for maximum Fleet Requests for this account.
+
+    The failure mode is nasty: the node group reports CREATING for 20+ minutes with zero
+    instances rather than failing fast, and the cause only appears in the Auto Scaling
+    group's scaling activities, not in the node group's own health issues or in any
+    Terraform output. Meanwhile the control plane bills at $0.10/hr.
+
+    Cost of the switch: t3.medium is ~$0.0416/hr on demand vs ~$0.0165/hr spot, so 2
+    nodes go from $0.033/hr to $0.083/hr — about +$1.20/day. Set back to SPOT once a
+    Fleet Request quota increase has been granted (Service Quotas -> EC2).
+  EOT
+  type        = string
+  default     = "ON_DEMAND"
+
+  validation {
+    condition     = contains(["SPOT", "ON_DEMAND"], var.node_capacity_type)
+    error_message = "node_capacity_type must be SPOT or ON_DEMAND."
+  }
+}
+
 variable "github_repository" {
   description = "GitHub \"org/repo\" allowed to assume the GitHub Actions deploy role via OIDC. Restricts which repo's workflows can authenticate as this role."
   type        = string

@@ -76,6 +76,14 @@ echo
 echo "==> terraform init"
 terraform init -input=false -no-color
 
+# One workspace per AWS account. The bootstrap stack keeps LOCAL state, so without this
+# a second account would be reconciled against the first account's state file —
+# Terraform would see every resource as "already created" and then fail, or worse, try
+# to adopt resources that live in a different account entirely.
+echo "==> selecting workspace '${ACCOUNT_ID}'"
+terraform workspace select "$ACCOUNT_ID" 2>/dev/null \
+  || terraform workspace new "$ACCOUNT_ID"
+
 import_if_exists() {
   local addr="$1" id="$2"
   if terraform state list 2>/dev/null | grep -qx -- "$addr"; then
