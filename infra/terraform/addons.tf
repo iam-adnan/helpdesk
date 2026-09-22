@@ -29,6 +29,16 @@ resource "helm_release" "aws_load_balancer_controller" {
     value = module.lb_controller_irsa.iam_role_arn
   }
 
+  # wait = true matters here specifically. This chart installs a mutating webhook, and
+  # `depends_on` only guarantees Helm returned — not that the webhook is actually
+  # serving. The ingress-nginx Service below is annotated for an NLB with our Elastic
+  # IPs; if it is created while the webhook is still coming up, the annotations go
+  # unprocessed and Kubernetes falls back to the in-tree provider, which silently
+  # produces a classic ELB with AWS-assigned addresses. That failure looks like a
+  # successful apply and is only caught later by deploy.sh's EIP-binding check.
+  wait    = true
+  timeout = 600
+
   depends_on = [module.eks]
 }
 
