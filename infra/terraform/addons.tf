@@ -145,6 +145,27 @@ locals {
         default = true
       }
 
+      # The ONLY source of HTTP-level telemetry in this stack. The Django app carries no
+      # instrumentation (django-prometheus is not in backend/requirements.txt), and the
+      # prometheus.io/scrape annotations on the backend Deployment point at :8000, which
+      # serves the app rather than a metrics endpoint — so they scrape nothing useful.
+      #
+      # ingress-nginx sits in front of every request, so enabling its exporter yields
+      # request rate, status-code breakdown and latency percentiles for the whole site
+      # without touching application code. serviceMonitor is what makes
+      # kube-prometheus-stack actually discover it; metrics.enabled alone only opens the
+      # port.
+      metrics = {
+        enabled = true
+        serviceMonitor = {
+          enabled = true
+          # The Prometheus CR selects ServiceMonitors by release label.
+          additionalLabels = {
+            release = "kube-prometheus-stack"
+          }
+        }
+      }
+
       resources = {
         requests = { cpu = "100m", memory = "128Mi" }
         limits   = { cpu = "500m", memory = "512Mi" }

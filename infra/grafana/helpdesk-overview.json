@@ -1,0 +1,534 @@
+{
+  "__inputs": [],
+  "__requires": [],
+  "uid": "helpdesk-overview",
+  "title": "Helpdesk — Overview",
+  "description": "Service health for the Mindstorm Helpdesk on EKS. Top row answers 'is it up?'; the rest answers 'why not?'. Traffic panels come from ingress-nginx (the app itself is not instrumented).",
+  "tags": ["helpdesk", "eks"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "editable": true,
+  "graphTooltip": 1,
+  "templating": {
+    "list": [
+      {
+        "name": "DS",
+        "label": "Data source",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      },
+      {
+        "name": "namespace",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${DS}" },
+        "query": "label_values(kube_pod_info, namespace)",
+        "current": { "text": "helpdesk", "value": "helpdesk" },
+        "refresh": 1,
+        "includeAll": false,
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Service health",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Pods running",
+      "description": "Pods in the Running phase. Expect 5: backend, frontend, celery, slack-bot, redis.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(kube_pod_status_phase{namespace=\"$namespace\", phase=\"Running\"})",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "graphMode": "none",
+        "colorMode": "value",
+        "textMode": "auto",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "#F2CC0C", "value": 3 },
+              { "color": "green", "value": 5 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Pods not running",
+      "description": "Anything Pending, Failed or Unknown. Should be 0 — a non-zero value here is the first thing to investigate.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(kube_pod_status_phase{namespace=\"$namespace\", phase!=\"Running\", phase!=\"Succeeded\"})",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "graphMode": "none",
+        "colorMode": "value",
+        "textMode": "auto",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "#F2CC0C", "value": 1 },
+              { "color": "red", "value": 2 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Restarts (1h)",
+      "description": "Container restarts across the namespace in the last hour. Sustained growth means a crash loop.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 8, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(kube_pod_container_status_restarts_total{namespace=\"$namespace\"}[1h])) or vector(0)",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "graphMode": "none",
+        "colorMode": "value",
+        "textMode": "auto",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "#F2CC0C", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Nodes ready",
+      "description": "Worker nodes reporting Ready. Expect 2.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 12, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(kube_node_status_condition{condition=\"Ready\", status=\"true\"})",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "graphMode": "none",
+        "colorMode": "value",
+        "textMode": "auto",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "#F2CC0C", "value": 1 },
+              { "color": "green", "value": 2 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Requests / sec",
+      "description": "Live request rate through ingress-nginx. Blank until the ingress-nginx ServiceMonitor has been scraped.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 16, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(nginx_ingress_controller_nginx_process_requests_total[5m])) or vector(0)",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 2,
+          "color": { "mode": "fixed", "fixedColor": "#3366CC" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "#3366CC", "value": null }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Ingress config healthy",
+      "description": "Whether ingress-nginx last reloaded its configuration successfully. 0 means a bad Ingress is being rejected and routing is stale.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 20, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "min(nginx_ingress_controller_config_last_reload_successful)",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "graphMode": "none",
+        "colorMode": "value",
+        "textMode": "auto",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "FAILED", "color": "red", "index": 0 },
+                "1": { "text": "OK", "color": "green", "index": 1 }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Traffic (ingress-nginx)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Request rate",
+      "description": "Requests per second served by ingress-nginx, per controller pod. Sourced from the controller's process counter — this build does not export per-request status or latency metrics, so there is no status-code breakdown available.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 7 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (pod) (rate(nginx_ingress_controller_nginx_process_requests_total[5m]))",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "showPoints": "never",
+            "gradientMode": "none"
+          },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Connections by state",
+      "description": "Active, reading, writing and waiting connections at the ingress. A climbing 'waiting' count with flat 'active' usually means slow upstreams rather than more traffic.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 7 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (state) (nginx_ingress_controller_nginx_process_connections)",
+          "legendFormat": "{{state}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Workload resources",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU by pod",
+      "description": "Actual CPU consumed per pod, in cores.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"$namespace\", container!=\"\", container!=\"POD\"}[5m]))",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["mean", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 3,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory by pod",
+      "description": "Working-set memory per pod. Nodes are c7i-flex.large (4Gi each), so the whole namespace has limited headroom.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"$namespace\", container!=\"\", container!=\"POD\"})",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["mean", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Cluster nodes",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Node CPU utilisation",
+      "description": "Percentage of each node's CPU in use.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 25 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "thresholdsStyle": { "mode": "dashed" }
+          },
+          "color": { "mode": "palette-classic" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "transparent", "value": null },
+              { "color": "red", "value": 85 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Node memory utilisation",
+      "description": "Percentage of each node's memory in use. The dashed line marks 85%.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 25 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "thresholdsStyle": { "mode": "dashed" }
+          },
+          "color": { "mode": "palette-classic" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "transparent", "value": null },
+              { "color": "red", "value": 85 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Network throughput",
+      "description": "Bytes in and out per node. Receive is drawn positive, transmit negative, so the two read as one balance rather than two overlapping lines.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 25 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (instance) (rate(node_network_receive_bytes_total{device!~\"lo|veth.*|docker.*\"}[5m]))",
+          "legendFormat": "{{instance}} in"
+        },
+        {
+          "refId": "B",
+          "expr": "-sum by (instance) (rate(node_network_transmit_bytes_total{device!~\"lo|veth.*|docker.*\"}[5m]))",
+          "legendFormat": "{{instance}} out"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "axisSoftMin": 0
+          },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      }
+    }
+  ]
+}
