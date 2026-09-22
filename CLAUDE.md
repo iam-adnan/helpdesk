@@ -66,7 +66,23 @@ cp infra/terraform/terraform.env.example infra/terraform/terraform.env   # fill 
 
 CI equivalents: `.github/workflows/infra.yml` (`workflow_dispatch` only — plan/apply/destroy, destroy needs `DESTROY` typed in). Deliberately not on `push`.
 
-**Cost reality:** the account holds **$120** of credit expiring 2027-03-22, and the stack bills ~**$0.182/hr** — roughly **660 hours of total cluster uptime** for the whole window. The spin-up → test → destroy loop is load-bearing, not a nicety. See `docs/superpowers/specs/2026-09-22-eks-static-ip-slack-bootstrap-design.md` for the full cost breakdown and `docs/superpowers/plans/2026-09-21-aws-eks-migration.md` for the original migration process (note: its "$200 credit" premise is outdated).
+**When an EKS node group hangs in `CREATING` with zero instances, the real error is in the Auto Scaling group — nowhere else.** This cost three failed deploys on 2026-09-22. The node group's own `health.issues` was empty, and Terraform printed nothing but "Still creating..." for 12+ minutes each time. Go straight to:
+
+```bash
+ASG=$(aws autoscaling describe-auto-scaling-groups \
+  --query "AutoScalingGroups[?contains(Tags[?Key=='eks:cluster-name'].Value,'helpdesk-eks')].AutoScalingGroupName|[0]" --output text)
+aws autoscaling describe-scaling-activities --auto-scaling-group-name "$ASG" \
+  --max-items 3 --query 'Activities[].StatusMessage' --output text
+```
+
+The three causes it surfaced, all now fixed but all invisible to `terraform plan`:
+1. **Public subnets need `map_public_ip_on_launch = true`** when `enable_nat_gateway = false`. Without NAT a public IP is the node's only route to the EKS API and to Docker Hub, and EKS rejects the node group rather than letting it come up broken.
+2. **`capacity_type = "SPOT"` provisions via EC2 Fleet**, so a zero Fleet Request quota fails every launch. `node_capacity_type` now defaults to `ON_DEMAND`.
+3. **A Free Plan account only launches Free-Tier-eligible instance types.** `t3.medium` is not one. Check with `aws ec2 describe-instance-types --filters Name=free-tier-eligible,Values=true`; in us-east-1 that's `m7i-flex.large` (8Gi), `c7i-flex.large` (4Gi, the current default), and the `.small`/`.micro` t3/t4g/t8i types. This restriction lifts if the account moves off the Free Plan.
+
+**Service quotas are a function of account age and usage, not of the Free Plan.** A brand-new account can show an applied quota of **0 vCPU across every EC2 family and Fargate**, while `get-aws-default-service-quota` still reports the documented 5 — and `RequestServiceQuotaIncrease` returns `AccessDenied` until AWS finishes activating the account. Always check the *applied* value (`get-service-quota`), never the default, before assuming compute is available.
+
+**Cost reality:** the EKS control plane alone is $0.10/hr ($2.40/day) and cannot be paused — only deleted. With `c7i-flex.large` nodes the stack runs ~$0.33/hr; on `t3.medium` Spot (needs a non-Free-Plan account and Fleet quota) it drops to ~$0.15/hr. Budget against the control plane first: it is ~30-65% of the bill and is charged whether or not a single pod runs. See `docs/superpowers/specs/2026-09-22-eks-static-ip-slack-bootstrap-design.md` for the full breakdown and `docs/superpowers/plans/2026-09-21-aws-eks-migration.md` for the original migration process (note: its "$200 credit" premise is outdated).
 
 ## Architecture
 
