@@ -3,6 +3,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
+      # Dockerfile.backend's final stage is distroless (no shell) for the images that get
+      # pushed to Docker Hub/deployed to EKS. Local dev via docker-compose targets the
+      # `builder` stage instead, which still has a full shell + pip, so the multi-step
+      # `sh -c "migrate && collectstatic && gunicorn"` command below keeps working unchanged.
+      target: builder
     container_name: helpdesk-backend
     restart: always
     volumes:
@@ -33,6 +38,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
+      target: builder
     container_name: helpdesk-slack-bot
     restart: always
     volumes:
@@ -49,6 +55,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
+      target: builder
     container_name: helpdesk-celery
     restart: always
     volumes:

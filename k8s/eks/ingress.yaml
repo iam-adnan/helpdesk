@@ -1,0 +1,63 @@
+# Routed by ingress-nginx (infra/terraform/addons.tf), which sits behind a Network Load
+# Balancer carrying the Elastic IP from infra/terraform/static_ip.tf.
+#
+# This was an ALB Ingress until the static-IP requirement arrived. An ALB has no static
+# IP — AWS exposes it only as a rotating DNS name, and Elastic IP attachment is
+# supported on NLBs alone. An NLB is L4 and cannot path-route, so ingress-nginx does the
+# L7 work the ALB used to do. Path routing below is unchanged from the ALB version.
+#
+# The alb.ingress.kubernetes.io/group.name mechanism is gone with it. That existed only
+# to merge this Ingress and the Grafana one onto a single ALB so we weren't paying for
+# two load balancers; one ingress-nginx controller serves Ingress objects across all
+# namespaces natively, so there is nothing to merge. The explicit group.order priorities
+# are gone too — nginx matches longest-prefix-first, so /api and /grafana beat the "/"
+# catch-all without being told to.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: helpdesk-ingress
+  namespace: helpdesk
+  annotations:
+    # Django serves the admin and DRF pages from templates that can exceed the default
+    # 4k proxy buffer, and ticket attachments are POSTed through here.
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          # backend Service exposes port 8000, frontend exposes port 3000 —
+          # confirmed against k8s/base/all-in-one.yaml directly.
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8000
+          # Django's admin and its static assets are served by the backend too. Under
+          # the ALB these fell through to the frontend because only /api was routed
+          # away from the "/" catch-all, which broke the admin settings panel that
+          # backend/slack_bot.py blocks on at startup.
+          - path: /admin
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8000
+          - path: /static
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 3000

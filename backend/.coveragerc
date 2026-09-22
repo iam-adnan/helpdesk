@@ -1,0 +1,15 @@
+[run]
+source = accounts,tickets,notifications,integrations,reports,settings_manager
+omit =
+    */migrations/*
+    */tests.py
+    */admin.py
+    */apps.py
+    manage.py
+    helpdesk/wsgi.py
+    helpdesk/asgi.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    raise NotImplementedError

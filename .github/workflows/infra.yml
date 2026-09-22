@@ -1,0 +1,175 @@
+# ============================================================================
+# Infrastructure lifecycle — terraform apply / destroy from CI.
+#
+# Deliberately workflow_dispatch ONLY. This must never be wired to `on: push`:
+# creating the cluster costs ~$0.182/hr against an account holding roughly 660 hours
+# of total runway, and an accidental apply-on-every-commit would drain it in days.
+# Someone presses the button, on purpose, each time.
+#
+# Required repo secret:
+#   AWS_INFRA_ROLE_ARN  — the `github_infra_role_arn` output of the BOOTSTRAP stack.
+#                         Printed by infra/scripts/bootstrap.sh.
+#
+# The role is created by the bootstrap stack rather than the main one on purpose: a
+# destroy run from here would otherwise delete the very role it is authenticating as,
+# fail partway, and leave billable resources behind with no credentials to clean them up.
+#
+# Terraform state lives in S3 (infra/terraform/backend.tf), which is what lets this
+# workflow and a laptop operate on the same infrastructure without clobbering each other.
+# ============================================================================
+
+name: Infrastructure (Terraform)
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What to do"
+        required: true
+        type: choice
+        options: [plan, apply, destroy]
+        default: plan
+      confirm:
+        description: "Type DESTROY to confirm a destroy. Ignored for plan/apply."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  terraform:
+    name: "🏗️ terraform ${{ inputs.action }}"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # A mistyped destroy is unrecoverable, so it needs a second, deliberate signal
+      # beyond picking it from the dropdown.
+      - name: Guard destroy
+        if: inputs.action == 'destroy' && inputs.confirm != 'DESTROY'
+        run: |
+          echo "::error::Refusing to destroy — type DESTROY in the confirm field."
+          exit 1
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_INFRA_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.7"
+
+      - name: terraform init
+        working-directory: infra/terraform
+        run: terraform init -input=false
+
+      - name: terraform plan
+        if: inputs.action == 'plan' || inputs.action == 'apply'
+        working-directory: infra/terraform
+        env:
+          TF_VAR_slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          TF_VAR_dockerhub_username: ${{ secrets.DOCKERHUB_USERNAME }}
+          TF_VAR_dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: terraform plan -input=false -out=tfplan
+
+      - name: terraform apply
+        if: inputs.action == 'apply'
+        working-directory: infra/terraform
+        run: terraform apply -input=false tfplan
+
+      # Mirrors infra/scripts/destroy.sh. The EBS volumes behind the PVCs and the NLB
+      # behind the ingress-nginx Service are created from inside the cluster; deleting
+      # the cluster first orphans them, and an orphaned load balancer additionally
+      # blocks VPC deletion by holding ENIs in its subnets.
+      - name: Pre-destroy — drain in-cluster AWS resources
+        if: inputs.action == 'destroy'
+        run: |
+          CLUSTER="${{ vars.EKS_CLUSTER_NAME }}"
+          if aws eks describe-cluster --name "$CLUSTER" >/dev/null 2>&1; then
+            aws eks update-kubeconfig --name "$CLUSTER" --region "${{ vars.AWS_REGION }}"
+            kubectl delete -k k8s/eks/ --ignore-not-found --timeout=180s || true
+            for ns in helpdesk monitoring; do
+              kubectl -n "$ns" delete pvc --all --ignore-not-found --timeout=180s || true
+            done
+            for i in $(seq 1 24); do
+              n=$(kubectl get pv --no-headers 2>/dev/null | wc -l | tr -d ' ')
+              [ "$n" = "0" ] && break
+              echo "waiting on $n PV(s)..."; sleep 5
+            done
+          else
+            echo "No live cluster — nothing to drain."
+          fi
+
+      - name: terraform destroy
+        if: inputs.action == 'destroy'
+        working-directory: infra/terraform
+        env:
+          TF_VAR_slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: terraform destroy -input=false -auto-approve
+
+      # "terraform destroy reported success" and "nothing is billing" are different
+      # claims. This asserts the second one.
+      - name: Post-destroy audit
+        if: inputs.action == 'destroy'
+        run: |
+          FAIL=0
+          check() {
+            local label="$1" count="$2"
+            if [ "$count" != "0" ] && [ -n "$count" ] && [ "$count" != "None" ]; then
+              echo "::error::${label} still present: ${count}"
+              FAIL=1
+            else
+              echo "ok: no ${label}"
+            fi
+          }
+          check "EKS clusters"   "$(aws eks list-clusters --query 'length(clusters)' --output text)"
+          check "load balancers" "$(aws elbv2 describe-load-balancers --query 'length(LoadBalancers)' --output text)"
+          check "Elastic IPs"    "$(aws ec2 describe-addresses --query 'length(Addresses)' --output text)"
+          check "EBS volumes"    "$(aws ec2 describe-volumes --query 'length(Volumes)' --output text)"
+          check "NAT gateways"   "$(aws ec2 describe-nat-gateways --filter 'Name=state,Values=available,pending' --query 'length(NatGateways)' --output text)"
+          exit $FAIL
+
+      - name: Report outputs
+        if: inputs.action == 'apply'
+        working-directory: infra/terraform
+        run: |
+          {
+            echo "### Infrastructure applied"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Site | $(terraform output -raw website_url) |"
+            echo "| Static IP | \`$(terraform output -raw website_ip)\` |"
+            echo "| Grafana | $(terraform output -raw grafana_url) |"
+            echo "| Deploy role ARN | \`$(terraform output -raw github_deploy_role_arn)\` |"
+            echo ""
+            echo "Credits remaining: \$$(aws freetier get-account-plan-state --region us-east-1 --query 'accountPlanRemainingCredits.amount' --output text 2>/dev/null || echo unknown)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Slack notify
+        if: always() && inputs.action != 'plan'
+        env:
+          WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+        working-directory: infra/terraform
+        run: |
+          [ -z "$WEBHOOK" ] && { echo "No webhook configured — skipping."; exit 0; }
+          if [ "${{ job.status }}" = "success" ]; then
+            if [ "${{ inputs.action }}" = "apply" ]; then
+              TEXT=":white_check_mark: *Infrastructure applied* — site is live at http://$(terraform output -raw website_ip 2>/dev/null || echo '?')"
+            else
+              TEXT=":broom: *Infrastructure destroyed* — verified nothing is billing."
+            fi
+          else
+            TEXT=":x: *terraform ${{ inputs.action }} FAILED* — <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|run ${{ github.run_id }}>. Resources may be partially created and billing."
+          fi
+          curl -s -X POST -H 'Content-type: application/json' \
+            --data "{\"text\": \"${TEXT}\"}" "$WEBHOOK" >/dev/null || true
