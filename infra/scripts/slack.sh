@@ -32,13 +32,46 @@ credits_remaining() {
   fi
 }
 
+# webhook_url — resolves the Slack Incoming Webhook, preferring AWS Secrets Manager.
+#
+# Secrets Manager is the source of truth (helpdesk/slack-webhook-url, created by
+# infra/terraform/secrets.tf with ignore_changes so a hand-entered value survives every
+# apply). TF_VAR_slack_webhook_url stays supported as an override for a machine that
+# has the value but no AWS credentials yet — e.g. a bootstrap run before the main stack
+# exists. Looked up once per script run and cached; a failed lookup is not retried.
+_WEBHOOK_CACHE=""
+_WEBHOOK_RESOLVED=""
+webhook_url() {
+  if [ -n "$_WEBHOOK_RESOLVED" ]; then
+    printf '%s' "$_WEBHOOK_CACHE"
+    return 0
+  fi
+  _WEBHOOK_RESOLVED="yes"
+
+  local v
+  v=$(aws secretsmanager get-secret-value \
+    --secret-id helpdesk/slack-webhook-url \
+    --query SecretString --output text 2>/dev/null) || v=""
+
+  # "REPLACE_ME" is the placeholder Terraform seeds the secret with; treat it as unset
+  # rather than POSTing to a URL that obviously isn't one.
+  if [ -z "$v" ] || [ "$v" = "None" ] || [ "$v" = "REPLACE_ME" ]; then
+    v="${TF_VAR_slack_webhook_url:-}"
+  fi
+
+  _WEBHOOK_CACHE="$v"
+  printf '%s' "$v"
+}
+
 # slack_notify <color> <title> <body>
 #   color: good | warning | danger  (or any hex like #36a64f)
 slack_notify() {
   local color="$1" title="$2" body="$3"
+  local hook
+  hook=$(webhook_url)
 
-  if [ -z "${TF_VAR_slack_webhook_url:-}" ]; then
-    echo "  [slack] TF_VAR_slack_webhook_url is unset — skipping notification." >&2
+  if [ -z "$hook" ]; then
+    echo "  [slack] no webhook configured (helpdesk/slack-webhook-url is unset or still REPLACE_ME) — skipping notification." >&2
     return 0
   fi
 
@@ -69,7 +102,7 @@ EOF
     -X POST -H 'Content-type: application/json' \
     --data "$payload" \
     --max-time 15 \
-    "$TF_VAR_slack_webhook_url" 2>/dev/null) || http_code="000"
+    "$hook" 2>/dev/null) || http_code="000"
 
   if [ "$http_code" != "200" ]; then
     echo "  [slack] webhook returned HTTP ${http_code} — message not delivered (continuing anyway)." >&2

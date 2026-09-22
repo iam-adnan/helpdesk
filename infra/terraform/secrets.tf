@@ -45,6 +45,14 @@ resource "aws_secretsmanager_secret_version" "dockerhub_credentials" {
     username = var.dockerhub_username
     password = var.dockerhub_token
   })
+
+  # Terraform seeds this once and then keeps its hands off. The real values are typed
+  # into the console (or set with `aws secretsmanager put-secret-value`), and WITHOUT
+  # this block the next apply would read the empty default back out of the variable and
+  # overwrite them — silently, since a secret's value never shows in a plan diff.
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
 }
 
 # ---- Monitoring stack secrets (kube-prometheus-stack, see monitoring.tf) ----
@@ -75,6 +83,16 @@ resource "aws_secretsmanager_secret" "slack_webhook_url" {
 }
 
 resource "aws_secretsmanager_secret_version" "slack_webhook_url" {
-  secret_id     = aws_secretsmanager_secret.slack_webhook_url.id
-  secret_string = var.slack_webhook_url
+  secret_id = aws_secretsmanager_secret.slack_webhook_url.id
+
+  # Seeded with a placeholder rather than "" — Secrets Manager rejects an empty
+  # SecretString outright, so an unset variable would fail the apply.
+  secret_string = var.slack_webhook_url != "" ? var.slack_webhook_url : "REPLACE_ME"
+
+  # Same reasoning as dockerhub_credentials above: this is filled in by hand and must
+  # survive every later apply. infra/scripts/slack.sh reads the webhook back OUT of
+  # this secret, so Secrets Manager — not terraform.env — is the source of truth.
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
 }
