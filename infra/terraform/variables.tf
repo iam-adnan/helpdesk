@@ -11,9 +11,9 @@ variable "cluster_name" {
 }
 
 variable "kubernetes_version" {
-  description = "EKS control plane version."
+  description = "EKS control plane version. Verified against `aws eks describe-cluster-versions` on 2026-09-22: 1.36/1.35/1.34 are STANDARD_SUPPORT ($0.10/hr), 1.33/1.32/1.31 have already rolled into EXTENDED_SUPPORT ($0.60/hr — 6x). 1.31 was the original default here and would have hit that trap; re-check `endOfStandardSupportDate` before every apply, since these windows keep moving forward."
   type        = string
-  default     = "1.31"
+  default     = "1.36"
 }
 
 variable "enable_nat_gateway" {

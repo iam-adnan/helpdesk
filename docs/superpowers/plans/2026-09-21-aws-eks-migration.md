@@ -273,7 +273,7 @@ module "eks" {
   version = "~> 20.0"
 
   cluster_name    = "helpdesk-eks"
-  cluster_version = "1.31"
+  cluster_version = "1.36" # check `aws eks describe-cluster-versions` before every apply — this rolls into EXTENDED_SUPPORT ($0.60/hr, 6x) on its own schedule; 1.31 (this doc's original example) already has as of 2026-09-22
 
   vpc_id     = module.vpc.vpc_id
   subnet_ids = var.enable_nat_gateway ? module.vpc.private_subnets : module.vpc.public_subnets
