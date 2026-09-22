@@ -1,0 +1,52 @@
+# Make the PVC-backed volumes writable by the non-root runtime user.
+#
+# Dockerfile.backend's runtime stage is gcr.io/distroless/python3-debian12:nonroot, which
+# runs as uid/gid 65532. An EBS volume provisioned by the CSI driver arrives owned by
+# root:root, so with no pod securityContext the application cannot write to /app/data —
+# and Django opens a log file there at import time (settings.py's LOG_FILE), so the
+# process dies on startup before doing anything:
+#
+#   ValueError: Unable to configure handler 'file'
+#
+# celery and slack-bot crash-looped on exactly this; backend would have too, once its
+# init container got a valid image.
+#
+# fsGroup makes the kubelet chown the volume to that GID on mount, which is the standard
+# fix and avoids either running as root or baking a chown into an image that has no shell
+# to run one with.
+#
+# Applied as an overlay patch rather than edited into k8s/base because the base manifest
+# is also the retired k3s path; this keeps the EKS-specific storage behaviour together
+# with the rest of the EKS adaptations.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: helpdesk
+spec:
+  template:
+    spec:
+      securityContext:
+        fsGroup: 65532
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: celery
+  namespace: helpdesk
+spec:
+  template:
+    spec:
+      securityContext:
+        fsGroup: 65532
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: slack-bot
+  namespace: helpdesk
+spec:
+  template:
+    spec:
+      securityContext:
+        fsGroup: 65532

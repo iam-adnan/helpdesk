@@ -329,7 +329,13 @@ jobs:
 
       - name: Roll out new images
         run: |
-          kubectl -n helpdesk set image deployment/backend backend=${{ env.DOCKER_BACKEND_IMAGE }}:${{ env.IMAGE_TAG }}
+          # `set image` matches containers BY NAME, and the backend Deployment has an
+          # initContainer called "migrate" that also runs the backend image. Setting only
+          # backend= leaves migrate on BACKEND_IMAGE_PLACEHOLDER, so the pod never gets
+          # past Init:InvalidImageName and the rollout below times out. Both must be named.
+          kubectl -n helpdesk set image deployment/backend \
+            migrate=${{ env.DOCKER_BACKEND_IMAGE }}:${{ env.IMAGE_TAG }} \
+            backend=${{ env.DOCKER_BACKEND_IMAGE }}:${{ env.IMAGE_TAG }}
           kubectl -n helpdesk set image deployment/celery celery=${{ env.DOCKER_BACKEND_IMAGE }}:${{ env.IMAGE_TAG }}
           kubectl -n helpdesk set image deployment/slack-bot slack-bot=${{ env.DOCKER_BACKEND_IMAGE }}:${{ env.IMAGE_TAG }}
           kubectl -n helpdesk set image deployment/frontend frontend=${{ env.DOCKER_FRONTEND_IMAGE }}:${{ env.IMAGE_TAG }}

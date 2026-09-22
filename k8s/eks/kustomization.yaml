@@ -20,6 +20,9 @@ resources:
 patches:
   - path: patch-storageclass.yaml
   - path: patch-delete-resources.yaml
+  # fsGroup so the distroless non-root user can write to the EBS-backed PVCs — without
+  # it celery/slack-bot/backend die at startup opening Django's log file.
+  - path: patch-fsgroup.yaml
   # Uncomment together with externalsecret-dockerhub.yaml above, for PRIVATE repos only:
   # - path: patch-imagepullsecrets.yaml
 
