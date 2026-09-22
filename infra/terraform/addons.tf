@@ -101,33 +101,40 @@ resource "kubernetes_namespace" "ingress_nginx" {
 locals {
   ingress_nginx_values = {
     controller = {
-      # One replica, matching every other Deployment in this project. The node budget
-      # is 2x t3.medium and the Spot vCPU quota is 5 with 4 already requested, so there
-      # is no room to grow the cluster if this turns out tight.
-      replicaCount = 1
+      # DaemonSet + hostNetwork instead of a LoadBalancer Service.
+      #
+      # The original design put an NLB in front, carrying the Elastic IP. That is
+      # impossible on this account: every CreateLoadBalancer call is rejected with
+      #
+      #   OperationNotPermitted: This AWS account currently does not support creating
+      #   load balancers. For more information, please contact AWS Support.
+      #
+      # so the Service sat <pending> forever and the Elastic IP never bound to anything.
+      # This avoids the ELB API entirely — ingress-nginx binds :80/:443 directly in each
+      # node's own network namespace, and the Elastic IP is attached straight to a node
+      # (see static_ip.tf). Traffic path becomes:
+      #
+      #   client -> Elastic IP -> node :80 -> ingress-nginx -> Service -> pod
+      #
+      # DaemonSet rather than a pinned single replica: every node listens on :80, so the
+      # Elastic IP can be moved between nodes without rescheduling anything. With
+      # hostNetwork only one such pod can exist per node anyway, which is exactly what a
+      # DaemonSet gives.
+      #
+      # Cost: this REMOVES the load balancer's ~$0.023/hr. Tradeoff: no LB-level health
+      # checking or failover — if the node holding the Elastic IP goes away, the address
+      # must be reattached to the surviving node.
+      kind        = "DaemonSet"
+      hostNetwork = true
 
+      # Required with hostNetwork: without it the pod inherits the node's resolv.conf and
+      # cannot resolve in-cluster Services, so every proxy_pass to backend/frontend fails.
+      dnsPolicy = "ClusterFirstWithHostNet"
+
+      # ClusterIP, not LoadBalancer — nothing should ask AWS for an ELB. The Service still
+      # exists because the chart's admission webhook needs one.
       service = {
-        type = "LoadBalancer"
-        annotations = {
-          # "external" selects the AWS Load Balancer Controller rather than the legacy
-          # in-tree cloud provider. The in-tree one ignores eip-allocations entirely,
-          # which would silently produce an NLB with AWS-assigned addresses — the exact
-          # failure this whole change exists to avoid.
-          "service.beta.kubernetes.io/aws-load-balancer-type"            = "external"
-          "service.beta.kubernetes.io/aws-load-balancer-nlb-target-type" = "ip"
-          "service.beta.kubernetes.io/aws-load-balancer-scheme"          = "internet-facing"
-
-          # The static IPs, straight out of Terraform state. One allocation ID per
-          # subnet, and the counts must match exactly or the NLB fails to provision.
-          "service.beta.kubernetes.io/aws-load-balancer-eip-allocations" = local.eip_allocation_ids
-          "service.beta.kubernetes.io/aws-load-balancer-subnets"         = join(",", local.ingress_subnet_ids)
-
-          # Required at the default nlb_az_count = 1: the NLB lives in ONE subnet but
-          # pods are spread across both AZs, so without cross-zone it can only reach
-          # roughly half of them and the other half's traffic blackholes. Bills
-          # $0.01/GB inter-AZ, which is immaterial at this traffic level.
-          "service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled" = "true"
-        }
+        type = "ClusterIP"
       }
 
       ingressClassResource = {

@@ -164,6 +164,23 @@ resource "helm_release" "kube_prometheus_stack" {
 
   values = [yamlencode(local.monitoring_values)]
 
+  # wait = false is REQUIRED here, not an optimisation.
+  #
+  # The Grafana pod mounts `grafana-admin-credentials`, a Secret that External Secrets
+  # Operator only creates once `kubectl apply -k k8s/eks/` has run — which happens AFTER
+  # this apply, by design (the ordering note at the top of this file says so). With the
+  # provider's default wait, Terraform blocks on a Deployment that cannot become ready
+  # yet, burns the full timeout, and then fails the whole apply with:
+  #
+  #   Warning: Helm release "" was created but has a failed status.
+  #   Error: context deadline exceeded
+  #
+  # ...after which the release is left in a `failed` state that blocks the next apply
+  # too. Everything else in the chart (Prometheus, Alertmanager, kube-state-metrics,
+  # node-exporter, the operator) comes up fine; Grafana starts on its own the moment the
+  # secret appears, with no restart needed.
+  wait = false
+
   depends_on = [
     module.eks,
     aws_eks_addon.ebs_csi, # Prometheus's PVC needs the gp3 StorageClass this backs

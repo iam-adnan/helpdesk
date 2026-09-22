@@ -54,9 +54,24 @@ fail() {
 # ---------------------------------------------------------------------------
 
 echo "==> Preflight"
-for tool in terraform aws kubectl; do
+for tool in terraform aws kubectl helm; do
   command -v "$tool" >/dev/null 2>&1 || { echo "ERROR: '$tool' not on PATH." >&2; exit 1; }
 done
+
+# The Terraform helm provider does NOT fetch a chart repository index on demand — it
+# reads the same local cache the helm CLI uses, and fails the whole apply with
+# "could not download chart: no cached repo found" if an index is missing. On Windows
+# that cache lives under %TEMP% (`helm env` -> HELM_REPOSITORY_CACHE), which is wiped
+# periodically, so a deploy that worked yesterday can fail today on an untouched config.
+# Registering and refreshing the repos here makes the script self-healing rather than
+# dependent on the operator's machine state.
+echo "==> Ensuring helm chart repositories are cached"
+helm repo add eks-charts           https://aws.github.io/eks-charts                  >/dev/null 2>&1 || true
+helm repo add metrics-server       https://kubernetes-sigs.github.io/metrics-server/ >/dev/null 2>&1 || true
+helm repo add external-secrets     https://charts.external-secrets.io                >/dev/null 2>&1 || true
+helm repo add ingress-nginx        https://kubernetes.github.io/ingress-nginx        >/dev/null 2>&1 || true
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
+helm repo update >/dev/null 2>&1 || echo "  WARNING: 'helm repo update' failed; chart downloads may fail." >&2
 
 aws sts get-caller-identity --profile "$AWS_PROFILE" >/dev/null 2>&1 \
   || { echo "ERROR: profile '${AWS_PROFILE}' cannot authenticate. Run bootstrap.sh first." >&2; exit 1; }
