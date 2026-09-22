@@ -102,7 +102,7 @@ if aws iam get-user --user-name "$TF_USER" >/dev/null 2>&1; then
   if ! terraform state list 2>/dev/null | grep -qx -- "aws_iam_user.terraform"; then
     echo "    IAM user '${TF_USER}' exists but is absent from state."
     for k in $(aws iam list-access-keys --user-name "$TF_USER" \
-                 --query 'AccessKeyMetadata[].AccessKeyId' --output text 2>/dev/null); do
+                 --query 'AccessKeyMetadata[].AccessKeyId' --output text 2>/dev/null || true); do
       echo "      deleting orphaned access key ${k} (its secret is unrecoverable)"
       aws iam delete-access-key --user-name "$TF_USER" --access-key-id "$k"
     done

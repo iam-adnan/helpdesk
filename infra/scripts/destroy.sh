@@ -116,7 +116,18 @@ LEFTOVERS=""
 add_leftover() { LEFTOVERS="${LEFTOVERS}
   - $1"; }
 
-count_or_zero() { local v="$1"; [ -z "$v" ] || [ "$v" = "None" ] && echo 0 || echo "$v"; }
+# Normalises the AWS CLI's empty/None results to "0" so the checks below don't treat a
+# failed lookup as "resources present". Written out longhand rather than chained with
+# &&/|| — the compact form is easy to get subtly wrong and this decides whether the
+# script claims nothing is billing.
+count_or_zero() {
+  local v="$1"
+  if [ -z "$v" ] || [ "$v" = "None" ]; then
+    echo 0
+  else
+    echo "$v"
+  fi
+}
 
 CLUSTERS=$($AWSC eks list-clusters --query 'length(clusters)' --output text 2>/dev/null || echo 0)
 [ "$(count_or_zero "$CLUSTERS")" != "0" ] && add_leftover "EKS cluster(s) still present: ${CLUSTERS}"
