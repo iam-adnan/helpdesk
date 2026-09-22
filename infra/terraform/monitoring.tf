@@ -29,7 +29,13 @@ locals {
   monitoring_values = {
     fullnameOverride = "kube-prometheus-stack"
 
+    # In-cluster Grafana is OFF when Grafana Cloud is in use — dashboards live at the
+    # Cloud stack instead. This is not just deduplication: the in-cluster Grafana ran with
+    # persistence disabled (see below), so it lost every dashboard and datasource on each
+    # teardown. Turning it off also frees ~180Mi on nodes that only have 4Gi each.
     grafana = {
+      enabled = !var.grafana_cloud_enabled
+
       admin = {
         existingSecret = "grafana-admin-credentials"
         userKey        = "admin-user"
@@ -62,7 +68,31 @@ locals {
 
     prometheus = {
       prometheusSpec = {
-        retention = "3d" # short on purpose, matches the spin-up/destroy operating pattern
+        # Ship everything to Grafana Cloud. This is what makes metrics outlive the
+        # cluster — the local TSDB becomes a short buffer, not the system of record.
+        #
+        # Grafana Cloud cannot scrape a private EKS cluster, so something in-cluster has
+        # to push. Prometheus is already here and already scraping, so remote_write is the
+        # smallest change that achieves it; a separate Grafana Alloy agent would be
+        # lighter but would duplicate the scrape config that kube-prometheus-stack
+        # generates from ServiceMonitors.
+        remoteWrite = var.grafana_cloud_enabled ? [{
+          url = var.grafana_cloud_prometheus_url
+          basicAuth = {
+            username = {
+              name = "grafana-cloud-credentials"
+              key  = "username"
+            }
+            password = {
+              name = "grafana-cloud-credentials"
+              key  = "password"
+            }
+          }
+        }] : []
+
+        # 6h rather than 3d once Cloud holds the history — local storage only needs to
+        # cover a remote_write outage, not act as the archive.
+        retention = var.grafana_cloud_enabled ? "6h" : "3d"
         resources = {
           requests = { cpu = "200m", memory = "512Mi" }
           limits   = { cpu = "500m", memory = "1Gi" }

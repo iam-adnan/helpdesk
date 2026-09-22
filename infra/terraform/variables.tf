@@ -114,6 +114,39 @@ variable "dockerhub_token" {
 # (static_ip.tf), so it is known at plan time and both values are derived in
 # `locals` instead. Override with `site_domain` below if a real domain is in play.
 
+# ---------------------------------------------------------------------------
+# Grafana Cloud
+# ---------------------------------------------------------------------------
+#
+# Metrics are shipped OUT of the cluster so they survive `terraform destroy`. In-cluster
+# Grafana ran with persistence disabled, so every teardown wiped all history — which, on
+# a cluster this project rebuilds constantly, meant monitoring was effectively write-only.
+
+variable "grafana_cloud_enabled" {
+  description = "Ship Prometheus metrics to Grafana Cloud via remote_write and disable the in-cluster Grafana. Set false to go back to a self-contained monitoring stack."
+  type        = bool
+  default     = true
+}
+
+variable "grafana_cloud_prometheus_url" {
+  description = "Grafana Cloud Prometheus remote_write endpoint, e.g. https://prometheus-prod-67-prod-us-west-0.grafana.net/api/prom/push. Stack-specific — copy it from the stack's Prometheus 'Send Metrics' page, do not guess the region."
+  type        = string
+  default     = ""
+}
+
+variable "grafana_cloud_username" {
+  description = "Grafana Cloud Prometheus instance ID — the numeric 'username' on the same page. NOT your account email."
+  type        = string
+  default     = ""
+}
+
+variable "grafana_cloud_token" {
+  description = "Grafana Cloud Access Policy token (glc_...) with the metrics:write scope. An account PASSWORD cannot be used here — remote_write authenticates with a token only. Pass via TF_VAR_grafana_cloud_token; stored in Secrets Manager, never in the repo."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 variable "site_domain" {
   description = "Optional real domain pointed at the static IP. Left empty (the default), the Elastic IP is used directly for CORS origins and Grafana's root_url — which is correct while the site is served over plain HTTP on an IP. Set this once a domain and TLS are in front of it."
   type        = string

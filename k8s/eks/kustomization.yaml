@@ -11,9 +11,14 @@ resources:
   - ingress.yaml
   - secretstore.yaml
   - externalsecret-helpdesk.yaml
-  - externalsecret-grafana.yaml
   - externalsecret-alertmanager-slack.yaml
-  - ingress-grafana.yaml
+  # Grafana Cloud remote_write credentials for Prometheus.
+  - externalsecret-grafana-cloud.yaml
+  # In-cluster Grafana is disabled (infra/terraform/variables.tf's grafana_cloud_enabled),
+  # so its admin-credentials secret and its /grafana Ingress would both point at a
+  # Service that no longer exists. Re-enable these two alongside grafana_cloud_enabled=false.
+  # - externalsecret-grafana.yaml
+  # - ingress-grafana.yaml
   # Uncomment for PRIVATE Docker Hub repos only (see externalsecret-dockerhub.yaml):
   # - externalsecret-dockerhub.yaml
 

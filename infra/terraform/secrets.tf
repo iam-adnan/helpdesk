@@ -82,6 +82,30 @@ resource "aws_secretsmanager_secret" "slack_webhook_url" {
   description = "Slack Incoming Webhook URL for Alertmanager's runtime-failure notifications."
 }
 
+# Grafana Cloud remote_write credentials, consumed by Prometheus via a k8s Secret that
+# External Secrets syncs into the monitoring namespace (k8s/eks/externalsecret-grafana-cloud.yaml).
+# Stored as JSON so one secret carries both halves of the basic-auth pair.
+resource "aws_secretsmanager_secret" "grafana_cloud_credentials" {
+  name        = "helpdesk/grafana-cloud-credentials"
+  description = "Grafana Cloud Prometheus remote_write basic auth: username is the numeric instance ID, password is an Access Policy token with metrics:write."
+}
+
+resource "aws_secretsmanager_secret_version" "grafana_cloud_credentials" {
+  secret_id = aws_secretsmanager_secret.grafana_cloud_credentials.id
+  secret_string = jsonencode({
+    username = var.grafana_cloud_username
+    password = var.grafana_cloud_token
+  })
+
+  # Same reasoning as the Slack webhook: the token is rotated by hand in the console or
+  # via put-secret-value, and must survive every later apply. Without this the next apply
+  # would read an empty variable back out and silently blank the credentials — silently,
+  # because a secret's value never appears in a plan diff.
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}
+
 resource "aws_secretsmanager_secret_version" "slack_webhook_url" {
   secret_id = aws_secretsmanager_secret.slack_webhook_url.id
 

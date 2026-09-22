@@ -63,6 +63,6 @@ output "website_url" {
 }
 
 output "grafana_url" {
-  description = "Grafana, routed through the same ingress at /grafana. Login is 'admin' + `aws secretsmanager get-secret-value --secret-id helpdesk/grafana-admin-password --query SecretString --output text`."
-  value       = "${local.website_url}/grafana"
+  description = "Where to view dashboards. With Grafana Cloud enabled this is the Cloud stack (metrics survive terraform destroy); otherwise it is the in-cluster Grafana at /grafana, whose login is 'admin' + `aws secretsmanager get-secret-value --secret-id helpdesk/grafana-admin-password --query SecretString --output text`."
+  value       = var.grafana_cloud_enabled ? "https://brightgladiolus2657.grafana.net" : "${local.website_url}/grafana"
 }
