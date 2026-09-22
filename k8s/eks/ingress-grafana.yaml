@@ -1,23 +1,24 @@
-# Separate Ingress in the monitoring namespace (Ingress backend Services must be in
-# the same namespace as the Ingress itself — Grafana's Service lives in "monitoring",
-# helpdesk-ingress.yaml's backend/frontend Services live in "helpdesk"). Shares the
-# same physical ALB as helpdesk-ingress via group.name, so this doesn't provision a
-# second load balancer.
+# Separate Ingress in the monitoring namespace (Ingress backend Services must be in the
+# same namespace as the Ingress itself — Grafana's Service lives in "monitoring",
+# ingress.yaml's backend/frontend Services live in "helpdesk").
+#
+# Under the old ALB this needed alb.ingress.kubernetes.io/group.name to share one
+# physical load balancer with the app's Ingress, plus an explicit group.order so
+# /grafana was matched before the app's "/" catch-all could shadow it. Neither is
+# needed now: a single ingress-nginx controller serves every namespace through the one
+# NLB, and nginx matches longest-prefix-first so /grafana wins over / on its own.
+#
+# No rewrite-target here on purpose. Grafana is configured with serve_from_sub_path and
+# root_url = <site>/grafana (infra/terraform/monitoring.tf), so it expects to receive
+# the /grafana prefix and builds its own asset URLs with it. Stripping the prefix would
+# break every CSS/JS path in the UI.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: grafana-ingress
   namespace: monitoring
-  annotations:
-    kubernetes.io/ingress.class: alb
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/healthcheck-path: /grafana/login
-    alb.ingress.kubernetes.io/group.name: helpdesk
-    # Lower than helpdesk-ingress.yaml's "20" — /grafana must be matched before
-    # helpdesk-ingress's "/" catch-all would otherwise shadow it.
-    alb.ingress.kubernetes.io/group.order: "10"
 spec:
+  ingressClassName: nginx
   rules:
     - http:
         paths:

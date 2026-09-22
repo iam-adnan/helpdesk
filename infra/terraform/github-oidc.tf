@@ -7,14 +7,17 @@
 # in CI via the existing DOCKERHUB_USERNAME/DOCKERHUB_TOKEN GitHub secrets, not AWS IAM.
 # This role only needs enough AWS access to point kubectl at the cluster.
 
-data "tls_certificate" "github" {
-  url = "https://token.actions.githubusercontent.com/.well-known/openid-configuration"
-}
-
-resource "aws_iam_openid_connect_provider" "github" {
-  url             = "https://token.actions.githubusercontent.com"
-  client_id_list  = ["sts.amazonaws.com"]
-  thumbprint_list = [data.tls_certificate.github.certificates[0].sha1_fingerprint]
+# The OIDC provider itself is NOT created here any more — it lives in the bootstrap
+# stack (infra/terraform/bootstrap/main.tf) and is only read here.
+#
+# Two reasons it moved. It is account-level infrastructure: there is exactly one per AWS
+# account regardless of how many times this cluster is created and destroyed, so churning
+# it on every cycle was always wrong. And .github/workflows/infra.yml can now run
+# `terraform destroy` from CI — if the provider it authenticates through were in this
+# stack, the destroy would delete its own trust anchor partway through and strand the
+# rest of the teardown.
+data "aws_iam_openid_connect_provider" "github" {
+  url = "https://token.actions.githubusercontent.com"
 }
 
 data "aws_iam_policy_document" "github_deploy_trust" {
@@ -23,7 +26,7 @@ data "aws_iam_policy_document" "github_deploy_trust" {
 
     principals {
       type        = "Federated"
-      identifiers = [aws_iam_openid_connect_provider.github.arn]
+      identifiers = [data.aws_iam_openid_connect_provider.github.arn]
     }
 
     condition {
@@ -53,11 +56,22 @@ resource "aws_iam_role_policy" "github_deploy_eks_describe" {
   role = aws_iam_role.github_deploy.id
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = ["eks:DescribeCluster"]
-      Resource = module.eks.cluster_arn
-    }]
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["eks:DescribeCluster"]
+        Resource = module.eks.cluster_arn
+      },
+      {
+        # Lets the deploy job resolve the site's static IP by tag for its health check,
+        # without needing read access to Terraform state or the S3 state bucket.
+        # ec2:DescribeAddresses has no resource-level permissions — "*" is the only
+        # valid Resource for it, and it exposes nothing but this account's own EIPs.
+        Effect   = "Allow"
+        Action   = ["ec2:DescribeAddresses"]
+        Resource = "*"
+      },
+    ]
   })
 }
 

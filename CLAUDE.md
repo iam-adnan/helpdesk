@@ -48,19 +48,33 @@ First account registered through the UI with an `@mindstormstudios.com` email au
 
 ### Infrastructure (Terraform, in `infra/terraform/`)
 
+Driven by scripts, not raw `terraform` commands — they carry the ordered teardown and the Slack notifications, and raw `terraform destroy` **orphans billable resources** (see below).
+
 ```bash
-export AWS_PROFILE=helpdesk-eks
-terraform init
-terraform plan -out=tfplan
-terraform apply tfplan
+cp infra/terraform/terraform.env.example infra/terraform/terraform.env   # fill it in (gitignored)
+
+./infra/scripts/bootstrap.sh    # ONCE, as account root: IAM user, S3 state bucket, OIDC provider, budget
+./infra/scripts/deploy.sh       # cluster + static IP + addons, then the app manifests
+./infra/scripts/destroy.sh      # ordered teardown + "is anything still billing?" audit
 ```
-See `docs/superpowers/plans/2026-09-21-aws-eks-migration.md` for the full process, cost plan, and a live deployment log against the actual AWS account.
+
+`terraform.env` is the single config surface (there is no `terraform.tfvars`). `BOOTSTRAP_AWS_PROFILE` holds root keys and is used only by `bootstrap.sh`; `AWS_PROFILE` is the `terraform-eks-admin` profile bootstrap writes, and everything else runs as that.
+
+**Two stacks, and the split matters.** `infra/terraform/bootstrap/` holds what must survive a destroy — the IAM user, the S3 state bucket, the GitHub OIDC provider, the CI infra role, the budget. If any of those lived in the main stack, `terraform destroy` would delete the identity running it, fail partway, and strand resources that keep billing.
+
+**Never run a bare `terraform destroy`.** EBS volumes (the `sqlite-pvc`/`media-pvc` claims and Prometheus's 10Gi) and the NLB are created from inside the cluster, so deleting the cluster first orphans them — and an orphaned load balancer additionally blocks VPC deletion by holding ENIs. `destroy.sh` drains them first, then audits EKS/ELB/EIP/EBS/NAT/EC2 counts, because "destroy reported success" and "nothing is billing" are different claims.
+
+CI equivalents: `.github/workflows/infra.yml` (`workflow_dispatch` only — plan/apply/destroy, destroy needs `DESTROY` typed in). Deliberately not on `push`.
+
+**Cost reality:** the account holds **$120** of credit expiring 2027-03-22, and the stack bills ~**$0.182/hr** — roughly **660 hours of total cluster uptime** for the whole window. The spin-up → test → destroy loop is load-bearing, not a nicety. See `docs/superpowers/specs/2026-09-22-eks-static-ip-slack-bootstrap-design.md` for the full cost breakdown and `docs/superpowers/plans/2026-09-21-aws-eks-migration.md` for the original migration process (note: its "$200 credit" premise is outdated).
 
 ## Architecture
 
 **Two independent deploy targets exist in this repo, don't conflate them:**
 - `k8s/base/all-in-one.yaml` — plain manifest, was used for a k3s-on-a-single-EC2-host deployment (now retired).
-- `k8s/eks/` — a Kustomize **overlay** on top of `k8s/base/` (`resources: [../base, ...]`), adapted for EKS: ALB `Ingress` instead of the old nginx NodePort, `gp3` StorageClass patches (EKS ships no default EBS StorageClass since k8s 1.23+), the nginx Deployment/Service deleted via a `$patch: delete`, and `ExternalSecret`/`ClusterSecretStore` resources replacing a hardcoded plaintext `Secret`.
+- `k8s/eks/` — a Kustomize **overlay** on top of `k8s/base/` (`resources: [../base, ...]`), adapted for EKS: an ingress-nginx `Ingress` instead of the old nginx NodePort, `gp3` StorageClass patches (EKS ships no default EBS StorageClass since k8s 1.23+), the nginx Deployment/Service deleted via a `$patch: delete`, and `ExternalSecret`/`ClusterSecretStore` resources replacing a hardcoded plaintext `Secret`.
+
+**The site is served on a static Elastic IP, and that dictates the ingress design.** An ALB cannot carry a static IP — AWS exposes it only as a rotating DNS name, and Elastic IP attachment is NLB-only. So `infra/terraform/static_ip.tf` allocates the EIP, `addons.tf`'s `ingress-nginx` Helm release requests an NLB with that allocation attached, and ingress-nginx does the L7 path routing (`/api`, `/admin`, `/static` → backend; `/grafana` → Grafana; `/` → frontend) an L4 NLB can't. `helm_release.aws_load_balancer_controller` is still required — it's what turns those Service annotations into a real NLB. Because the EIP exists at *plan* time, `cors_allowed_origins` and Grafana's `root_url` are derived in one apply; the old two-phase "apply, read the ALB hostname, apply again" dance is gone, along with the `alb.ingress.kubernetes.io/group.name` trick that merged two Ingresses onto one ALB.
 
 **Runtime container images are distroless** (`Dockerfile.backend`, `Dockerfile.frontend`) — multi-stage builds whose final stage has no shell, no package manager. This has real consequences for how commands are wired into `k8s/base/all-in-one.yaml`: every container command must be exec-form (`["python3", "manage.py", "migrate", "--noinput"]`, not `sh -c "a && b"`), and `python3`/no bare `python`. `docker-compose.yml`'s backend-family services (`backend`, `celery`, `slack-bot`) build against the Dockerfile's `builder` stage specifically (`target: builder`) since local dev's multi-step shell commands need a shell the distroless runtime stage doesn't have.
 

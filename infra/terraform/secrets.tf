@@ -23,12 +23,12 @@ resource "aws_secretsmanager_secret_version" "django_secret_key" {
 
 resource "aws_secretsmanager_secret" "cors_allowed_origins" {
   name        = "helpdesk/cors-allowed-origins"
-  description = "CORS_ALLOWED_ORIGINS for the helpdesk backend. Update the value after the ALB's hostname is known (see variables.tf's cors_allowed_origins description)."
+  description = "CORS_ALLOWED_ORIGINS for the helpdesk backend. Derived from the ingress Elastic IP (static_ip.tf) — no longer needs a follow-up apply now that the site address exists before the app does."
 }
 
 resource "aws_secretsmanager_secret_version" "cors_allowed_origins" {
   secret_id     = aws_secretsmanager_secret.cors_allowed_origins.id
-  secret_string = var.cors_allowed_origins
+  secret_string = local.cors_allowed_origins
 }
 
 # Only actually consumed if the Docker Hub repos are private (see

@@ -8,12 +8,19 @@
 #   EMAIL_USERNAME, EMAIL_PASSWORD,
 #   NOTIFY_EMAIL                          — deploy-result email (already configured)
 #   AWS_DEPLOY_ROLE_ARN                   — IAM role GitHub assumes via OIDC to deploy
-#                                            to EKS (infra/terraform/github-oidc.tf's
-#                                            `github_deploy_role_arn` output). NOT set
-#                                            yet — the AWS account this deploys to
-#                                            doesn't exist until it's created.
+#                                            to EKS. The `github_deploy_role_arn` output
+#                                            of the MAIN stack (infra/terraform), printed
+#                                            by infra/scripts/deploy.sh.
+#   AWS_INFRA_ROLE_ARN                    — IAM role for .github/workflows/infra.yml
+#                                            (terraform apply/destroy). The
+#                                            `github_infra_role_arn` output of the
+#                                            BOOTSTRAP stack, printed by
+#                                            infra/scripts/bootstrap.sh. Note this comes
+#                                            from bootstrap, not the main stack — a
+#                                            CI-run destroy must not be able to delete
+#                                            the role that is running it.
 #   SLACK_WEBHOOK_URL                     — Slack Incoming Webhook for pipeline/deploy
-#                                            notifications. NOT set yet.
+#                                            notifications.
 #
 # Variables (non-sensitive — set with `gh variable set NAME`):
 #   AWS_REGION           — e.g. "us-east-1"
@@ -304,7 +311,7 @@ jobs:
       id-token: write
       contents: read
     outputs:
-      alb_hostname: ${{ steps.alb.outputs.hostname }}
+      site_ip: ${{ steps.ip.outputs.ip }}
     steps:
       - uses: actions/checkout@v5
 
@@ -334,19 +341,23 @@ jobs:
           kubectl -n helpdesk rollout status deployment/celery --timeout=180s
           kubectl -n helpdesk rollout status deployment/slack-bot --timeout=180s
 
-      - name: Get ALB hostname
-        id: alb
+      # The site address is a STATIC Elastic IP allocated by Terraform
+      # (infra/terraform/static_ip.tf), not a load balancer hostname that has to be
+      # waited for. It is looked up by tag rather than read from Terraform outputs so
+      # this job needs no access to the state bucket — just ec2:DescribeAddresses,
+      # granted in infra/terraform/github-oidc.tf.
+      - name: Resolve static site IP
+        id: ip
         run: |
-          for i in $(seq 1 20); do
-            HOSTNAME=$(kubectl -n helpdesk get ingress helpdesk-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
-            if [ -n "$HOSTNAME" ]; then
-              echo "hostname=$HOSTNAME" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            echo "Waiting for ALB hostname... ($i/20)"
-            sleep 15
-          done
-          echo "::warning::ALB hostname not assigned after 5 minutes — health check will fail"
+          IP=$(aws ec2 describe-addresses \
+            --filters "Name=tag:Role,Values=ingress-static-ip" \
+            --query 'Addresses[0].PublicIp' --output text 2>/dev/null || echo "None")
+          if [ -z "$IP" ] || [ "$IP" = "None" ]; then
+            echo "::error::No Elastic IP tagged Role=ingress-static-ip found. Has infra/terraform been applied?"
+            exit 1
+          fi
+          echo "ip=$IP" >> "$GITHUB_OUTPUT"
+          echo "Site IP: $IP"
 
   # ============================================
   # JOB 6: Health Check
@@ -357,15 +368,15 @@ jobs:
     needs: [deploy]
     if: vars.EKS_DEPLOY_ENABLED == 'true'
     steps:
-      - name: Check backend health via ALB
+      - name: Check backend health via the static IP
         run: |
-          HOSTNAME="${{ needs.deploy.outputs.alb_hostname }}"
-          if [ -z "$HOSTNAME" ]; then
-            echo "::error::No ALB hostname returned by the deploy job"
+          SITE_IP="${{ needs.deploy.outputs.site_ip }}"
+          if [ -z "$SITE_IP" ]; then
+            echo "::error::No site IP returned by the deploy job"
             exit 1
           fi
           for i in $(seq 1 10); do
-            STATUS=$(curl -sk -o /dev/null -w "%{http_code}" "http://$HOSTNAME/api/health/" 2>/dev/null || echo "000")
+            STATUS=$(curl -sk -o /dev/null -w "%{http_code}" "http://$SITE_IP/api/health/" 2>/dev/null || echo "000")
             echo "Attempt $i: HTTP $STATUS"
             if [ "$STATUS" = "200" ]; then
               echo "✅ Backend is healthy!"
@@ -406,7 +417,7 @@ jobs:
             Branch: ${{ github.ref_name }}
             By: ${{ github.actor }}
 
-            App: http://${{ needs.deploy.outputs.alb_hostname }}
+            App: http://${{ needs.deploy.outputs.site_ip }}
           to: ${{ secrets.NOTIFY_EMAIL }}
           from: "Helpdesk CI/CD <${{ secrets.EMAIL_USERNAME }}>"
 
@@ -438,7 +449,7 @@ jobs:
           webhook-type: incoming-webhook
           payload: |
             {
-              "text": ":white_check_mark: *Helpdesk deployed* — <https://github.com/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}> on `${{ github.ref_name }}` by ${{ github.actor }}\nApp: http://${{ needs.deploy.outputs.alb_hostname }}"
+              "text": ":white_check_mark: *Helpdesk deployed* — <https://github.com/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}> on `${{ github.ref_name }}` by ${{ github.actor }}\nApp: http://${{ needs.deploy.outputs.site_ip }}"
             }
 
       - name: Slack notify - deploy failure

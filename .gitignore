@@ -9,6 +9,11 @@
 tfplan
 *.tfplan
 
+# Terraform/AWS config and secrets — the single config surface, replacing terraform.tfvars.
+# Holds the Slack webhook and (optionally) Docker Hub credentials in plaintext.
+terraform.env
+!terraform.env.example
+
 # Python
 __pycache__/
 *.pyc

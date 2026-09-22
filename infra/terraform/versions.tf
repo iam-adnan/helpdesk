@@ -14,19 +14,16 @@ terraform {
       source  = "hashicorp/helm"
       version = "~> 2.14"
     }
-    tls = {
-      source  = "hashicorp/tls"
-      version = "~> 4.0"
-    }
     random = {
       source  = "hashicorp/random"
       version = "~> 3.6"
     }
   }
 
-  # Local state by default — deliberate for this project. State for a cluster you
-  # intend to `terraform destroy` between every session (see the cost plan in
-  # docs/superpowers/plans/2026-09-21-aws-eks-migration.md) doesn't need to survive
-  # your laptop; an S3+DynamoDB remote backend is one block to add later if this
-  # becomes a team-shared, always-on environment.
+  # State is remote, in S3 — see backend.tf. This used to be local on the reasoning
+  # that a cluster destroyed between sessions doesn't need state outliving the laptop.
+  # That held until you consider losing state while the cluster is UP: there is then no
+  # clean `terraform destroy` path at all, and the resources keep billing. CI also runs
+  # apply/destroy now (.github/workflows/infra.yml), so state has to be somewhere both
+  # the laptop and the runner can reach.
 }

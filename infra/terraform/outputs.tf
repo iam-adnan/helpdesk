@@ -45,7 +45,24 @@ output "kubeconfig_command" {
   value = "aws eks update-kubeconfig --name ${module.eks.cluster_name} --region ${var.aws_region}"
 }
 
+# ---- Site address (static, known at plan time — see static_ip.tf) ----
+
+output "website_ip" {
+  description = "The static Elastic IP the site is served on. Read by infra/scripts/*.sh for the Slack deploy messages."
+  value       = local.website_ip
+}
+
+output "website_ips" {
+  description = "Every ingress Elastic IP. Same as website_ip unless nlb_az_count = 2."
+  value       = aws_eip.ingress[*].public_ip
+}
+
+output "website_url" {
+  description = "Base URL of the helpdesk app."
+  value       = local.website_url
+}
+
 output "grafana_url" {
-  description = "Once the ALB Ingress has a hostname (kubectl -n helpdesk get ingress helpdesk-ingress), Grafana is at http://<that-hostname>/grafana — login is 'admin' + `aws secretsmanager get-secret-value --secret-id helpdesk/grafana-admin-password --query SecretString --output text`."
-  value       = "http://${var.grafana_domain}/grafana"
+  description = "Grafana, routed through the same ingress at /grafana. Login is 'admin' + `aws secretsmanager get-secret-value --secret-id helpdesk/grafana-admin-password --query SecretString --output text`."
+  value       = "${local.website_url}/grafana"
 }

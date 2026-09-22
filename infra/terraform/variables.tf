@@ -53,10 +53,28 @@ variable "dockerhub_token" {
   sensitive   = true
 }
 
-variable "cors_allowed_origins" {
-  description = "Value for the app's CORS_ALLOWED_ORIGINS runtime secret. Circular on a fresh cluster (the ALB hostname doesn't exist until after apply) — leave the default on first apply, then update via `terraform apply -var cors_allowed_origins=http://<alb-hostname>` once Task 6/11's Ingress has a real ADDRESS, or set it once a real domain is in front of the ALB."
+# NOTE: `cors_allowed_origins` and `grafana_domain` used to live here, both carrying a
+# warning that they were circular on a fresh cluster — the ALB hostname didn't exist
+# until after apply, so both needed a second `terraform apply` to fix up. That is no
+# longer true. The site address is now an Elastic IP allocated by Terraform itself
+# (static_ip.tf), so it is known at plan time and both values are derived in
+# `locals` instead. Override with `site_domain` below if a real domain is in play.
+
+variable "site_domain" {
+  description = "Optional real domain pointed at the static IP. Left empty (the default), the Elastic IP is used directly for CORS origins and Grafana's root_url — which is correct while the site is served over plain HTTP on an IP. Set this once a domain and TLS are in front of it."
   type        = string
-  default     = "http://localhost:3000,http://localhost"
+  default     = ""
+}
+
+variable "nlb_az_count" {
+  description = "Number of availability zones (and therefore Elastic IPs) the ingress NLB spans. An NLB takes exactly one EIP per subnet, so 1 (the default) yields exactly ONE static IP — simplest to share and cheapest. 2 yields two IPs and a genuinely HA load balancer for an extra ~$0.005/hr, at the cost of making \"the website IP\" ambiguous. Must not exceed the number of subnets the VPC has (2)."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.nlb_az_count >= 1 && var.nlb_az_count <= 2
+    error_message = "nlb_az_count must be 1 or 2 — the VPC in vpc.tf defines exactly two public and two private subnets."
+  }
 }
 
 variable "slack_webhook_url" {
@@ -66,8 +84,3 @@ variable "slack_webhook_url" {
   sensitive   = true
 }
 
-variable "grafana_domain" {
-  description = "Hostname Grafana is served under (the ALB's DNS name, or a real domain once one is in front of it) — needed for Grafana's root_url/serve_from_sub_path config since it's routed through the same ALB at the /grafana path rather than getting its own load balancer. Circular on a fresh cluster like cors_allowed_origins above; update after first apply once the ALB hostname is known."
-  type        = string
-  default     = "localhost"
-}

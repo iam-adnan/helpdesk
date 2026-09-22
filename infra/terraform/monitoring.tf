@@ -43,8 +43,8 @@ locals {
       }
       "grafana.ini" = {
         server = {
-          domain              = var.grafana_domain
-          root_url            = "http://${var.grafana_domain}/grafana"
+          domain              = local.site_host
+          root_url            = "${local.website_url}/grafana"
           serve_from_sub_path = true
         }
       }
