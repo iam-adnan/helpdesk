@@ -29,6 +29,17 @@
 
 set -euo pipefail
 
+# Git Bash / MSYS rewrites any argument that looks like a POSIX path into a Windows one
+# before the process ever sees it, so `-- /bin/sh -c ...` reaches Kubernetes as
+# "C:/Program Files/Git/usr/bin/sh" and every load generator dies at StartError:
+#
+#   exec: "C:/Program Files/Git/usr/bin/sh": stat ...: no such file or directory
+#
+# The pods are created, so the test looks like it is running, and then measures nothing
+# — CPU stays at 1% and the HPA is blamed for not scaling. Harmless on Linux and macOS,
+# where the variable is simply ignored.
+export MSYS_NO_PATHCONV=1
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ENV_FILE="${REPO_ROOT}/infra/terraform/terraform.env"
@@ -54,7 +65,7 @@ trap cleanup EXIT INT TERM
 snapshot() {
   echo "    nodes:    $(kubectl get nodes --no-headers 2>/dev/null | grep -c Ready)"
   echo "    frontend: $(kubectl -n "$NS" get deploy frontend -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0) ready"
-  kubectl -n "$NS" get hpa frontend --no-headers 2>/dev/null | awk '{print "    hpa:      targets="$3" replicas="$6}'
+  kubectl -n "$NS" get hpa frontend --no-headers 2>/dev/null | awk '{print "    hpa:      cpu="$4" replicas="$7"/"$6}'
 }
 
 # ---------------------------------------------------------------------------
@@ -83,7 +94,7 @@ test_hpa() {
     sleep 10
     LINE=$(kubectl -n "$NS" get hpa frontend --no-headers 2>/dev/null || echo "")
     REPL=$(kubectl -n "$NS" get deploy frontend -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "$START")
-    echo "    [$((i * 10))s] $(printf '%s' "$LINE" | awk '{print "targets="$3" replicas="$6}')"
+    echo "    [$((i * 10))s] $(printf '%s' "$LINE" | awk '{print "cpu="$4" replicas="$7"/"$6}')"
     if [ "${REPL:-0}" -gt "${START:-2}" ]; then
       echo
       echo "    PASS: frontend scaled ${START} -> ${REPL}"

@@ -253,7 +253,22 @@ jobs:
           cache-to: type=gha,mode=max
 
       # ---- Trivy Image Scans ----
-      - name: "🛡️ Trivy Scan Backend Image"
+      #
+      # These run BETWEEN build and push, deliberately: the images exist locally
+      # (load: true above) but are not published yet, so a scan that fails stops a
+      # vulnerable image from ever reaching Docker Hub. Scanning after the push would
+      # only tell you about something the world can already pull.
+      #
+      # Split into two passes per image because CRITICAL and HIGH deserve different
+      # answers. CRITICAL fails the build. HIGH is reported and does not, because base
+      # images routinely carry HIGH findings with no fix available upstream — gating on
+      # those means the pipeline blocks on something nobody here can act on, and the
+      # usual outcome is that the gate gets switched off entirely.
+      #
+      # Suppress a specific finding by adding its CVE to .trivyignore with a reason and
+      # a date, rather than by widening the severity filter.
+
+      - name: "🛡️ Trivy Backend Image — report CRITICAL+HIGH"
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.DOCKER_BACKEND_IMAGE }}:${{ env.IMAGE_TAG }}
@@ -261,13 +276,68 @@ jobs:
           exit-code: "0"
           severity: "CRITICAL,HIGH"
 
-      - name: "🛡️ Trivy Scan Frontend Image"
+      - name: "🛡️ Trivy Backend Image — GATE on CRITICAL"
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.DOCKER_BACKEND_IMAGE }}:${{ env.IMAGE_TAG }}
+          format: "table"
+          exit-code: "1"
+          severity: "CRITICAL"
+          ignore-unfixed: true
+
+      - name: "🛡️ Trivy Frontend Image — report CRITICAL+HIGH"
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.DOCKER_FRONTEND_IMAGE }}:${{ env.IMAGE_TAG }}
           format: "table"
           exit-code: "0"
           severity: "CRITICAL,HIGH"
+
+      - name: "🛡️ Trivy Frontend Image — GATE on CRITICAL"
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.DOCKER_FRONTEND_IMAGE }}:${{ env.IMAGE_TAG }}
+          format: "table"
+          exit-code: "1"
+          severity: "CRITICAL"
+          ignore-unfixed: true
+
+      # SARIF so image findings land in the Security tab alongside the source scan's,
+      # instead of living only in a log nobody opens twice. Distinct `category` values —
+      # without them each upload overwrites the previous one and only the last survives.
+      - name: Trivy backend image SARIF
+        uses: aquasecurity/trivy-action@master
+        if: always()
+        with:
+          image-ref: ${{ env.DOCKER_BACKEND_IMAGE }}:${{ env.IMAGE_TAG }}
+          format: "sarif"
+          output: "trivy-image-backend.sarif"
+        continue-on-error: true
+
+      - name: Trivy frontend image SARIF
+        uses: aquasecurity/trivy-action@master
+        if: always()
+        with:
+          image-ref: ${{ env.DOCKER_FRONTEND_IMAGE }}:${{ env.IMAGE_TAG }}
+          format: "sarif"
+          output: "trivy-image-frontend.sarif"
+        continue-on-error: true
+
+      - name: Upload backend image SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: "trivy-image-backend.sarif"
+          category: "trivy-image-backend"
+        continue-on-error: true
+
+      - name: Upload frontend image SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: "trivy-image-frontend.sarif"
+          category: "trivy-image-frontend"
+        continue-on-error: true
 
       # ---- Push Images ----
       - name: Push Backend Image
