@@ -36,3 +36,29 @@ CVE-2025-64459
 #
 # REVIEW: 2026-10-01 — drop this once the base image ships the patched libssl3.
 CVE-2026-31789
+
+# ---------------------------------------------------------------------------
+# CVE-2026-75604 / GHSA-2xp9-vwfh-vxw4 — Next.js unauthenticated RCE. CRITICAL.
+# Suppressed only because the vulnerable ROUTE has been removed, not because the
+# finding was judged unimportant.
+# ---------------------------------------------------------------------------
+# Two separate RCEs are bundled under these IDs:
+#
+#   1. "on windows-hosted servers" — not applicable. The runtime image is
+#      gcr.io/distroless/nodejs20-debian12, linux/amd64, on Linux nodes.
+#   2. Image Optimization API, via crafted AVIF input — this one WAS applicable, and
+#      the "we do not use next/image" argument is not sufficient on its own: Next serves
+#      /_next/image regardless of whether the app renders an <Image>. Checked against
+#      the live site rather than assumed — it answered HTTP 400 (a handled request with
+#      a bad parameter), not 404.
+#
+# Mitigated by images.unoptimized in frontend/next.config.js, which removes the route.
+# Verified after the change: /_next/image now returns 404 and /login still returns 200.
+#
+# Fixed upstream only in Next 15.5.24 / 16.3.3 — a major upgrade from this 14.x line,
+# with breaking changes (async request APIs), so not something to land days before a
+# demo. The mitigation closes the exposure in the meantime.
+#
+# REVIEW: 2026-10-01 — upgrade to Next 15.x with the Django 5.2 work and delete this.
+CVE-2026-75604
+GHSA-2xp9-vwfh-vxw4
