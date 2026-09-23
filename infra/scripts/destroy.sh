@@ -80,11 +80,49 @@ if $AWSC eks describe-cluster --name "$CLUSTER" >/dev/null 2>&1; then
   done
 
   echo "    waiting for PersistentVolumes to drain"
+  PV_DRAINED=""
   for i in $(seq 1 24); do
     remaining=$(kubectl get pv --no-headers 2>/dev/null | wc -l | tr -d ' ')
-    [ "$remaining" = "0" ] && { echo "    all PVs released"; break; }
+    [ "$remaining" = "0" ] && { echo "    all PVs released"; PV_DRAINED="yes"; break; }
     echo "      ${remaining} PV(s) still present... ($i/24)"
     sleep 5
+  done
+
+  # A PV that never drains means its pod is wedged, and the backing EBS volume will be
+  # orphaned the moment the cluster goes — billing forever, invisible, with no owner.
+  # Force the pods out so the CSI driver can release the volumes while it still exists.
+  if [ -z "$PV_DRAINED" ]; then
+    echo "    PVs did not drain — force-removing the pods holding them"
+    for ns in helpdesk monitoring; do
+      for p in $(kubectl -n "$ns" get pods -o name 2>/dev/null); do
+        kubectl -n "$ns" patch "$p" --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
+        kubectl -n "$ns" delete "$p" --force --grace-period=0 >/dev/null 2>&1 || true
+      done
+    done
+    sleep 20
+  fi
+
+  # THE DEADLOCK THIS SCRIPT EXISTS TO AVOID.
+  #
+  # Terraform destroys the monitoring namespace and the External Secrets operator in
+  # PARALLEL. The namespace holds ExternalSecrets whose finalizers only that operator can
+  # clear, so whichever dies first decides the outcome: if the operator goes, the
+  # finalizers never clear, the namespace hangs in Terminating indefinitely, Terraform
+  # never reaches the node group, and the internet gateway cannot delete because
+  # instances still hold public IPs. The whole destroy stalls with no error — it just
+  # prints "Still destroying..." until someone notices. That cost a full night of
+  # cluster billing on 2026-09-22.
+  #
+  # Clearing the finalizers up front removes the dependency entirely: by the time
+  # Terraform gets there, nothing is waiting on a controller that is about to vanish.
+  echo "    clearing External Secrets finalizers (prevents a Terminating-namespace deadlock)"
+  for ns in helpdesk monitoring; do
+    for es in $(kubectl -n "$ns" get externalsecret -o name 2>/dev/null); do
+      kubectl -n "$ns" patch "$es" --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
+    done
+  done
+  for css in $(kubectl get clustersecretstore -o name 2>/dev/null); do
+    kubectl patch "$css" --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
   done
 else
   echo "    no live cluster found — skipping in-cluster cleanup"
@@ -106,7 +144,25 @@ terraform init -input=false -no-color -reconfigure \
 echo
 echo "==> terraform destroy"
 DESTROY_OK="yes"
-terraform destroy -input=false -auto-approve -no-color || DESTROY_OK=""
+DESTROY_OUT=$(mktemp -t helpdesk-destroy.XXXXXX.log)
+terraform destroy -input=false -auto-approve -no-color 2>&1 | tee "$DESTROY_OUT" || DESTROY_OK=""
+
+# A destroy killed partway (closed laptop, ended session, Ctrl-C) leaves the S3 state
+# lock behind, and every later attempt then fails instantly on "Error acquiring the state
+# lock" — while the cluster keeps billing. The lock is only ever ours here (single
+# operator, and CI serialises through the same state), so reclaiming it automatically is
+# safe and strictly better than a human noticing hours later.
+if [ -z "$DESTROY_OK" ] && grep -q "Error acquiring the state lock" "$DESTROY_OUT"; then
+  STALE_ID=$(grep -oE "ID:[[:space:]]+[0-9a-f-]{36}" "$DESTROY_OUT" | head -1 | awk '{print $2}')
+  if [ -n "$STALE_ID" ]; then
+    echo
+    echo "==> stale state lock ${STALE_ID} detected — reclaiming and retrying"
+    terraform force-unlock -force "$STALE_ID" >/dev/null 2>&1 || true
+    DESTROY_OK="yes"
+    terraform destroy -input=false -auto-approve -no-color || DESTROY_OK=""
+  fi
+fi
+rm -f "$DESTROY_OUT"
 
 # ---------------------------------------------------------------------------
 # 3. Audit — the part that actually answers "is anything still billing?"
@@ -138,12 +194,24 @@ CLUSTERS=$($AWSC eks list-clusters --query 'length(clusters)' --output text 2>/d
 LBS=$($AWSC elbv2 describe-load-balancers --query 'length(LoadBalancers)' --output text 2>/dev/null || echo 0)
 [ "$(count_or_zero "$LBS")" != "0" ] && add_leftover "Load balancer(s) still present: ${LBS} (billing ~\$0.023/hr each)"
 
-EIPS=$($AWSC ec2 describe-addresses --query 'length(Addresses)' --output text 2>/dev/null || echo 0)
-[ "$(count_or_zero "$EIPS")" != "0" ] && add_leftover "Elastic IP(s) still allocated: ${EIPS} (billing ~\$0.005/hr each)"
+# The ingress Elastic IP is OWNED BY THE BOOTSTRAP STACK and is meant to outlive this
+# teardown — that is the whole point of keeping the site's address stable. Counting it
+# here made the audit report INCOMPLETE on a perfectly clean destroy, which is worse than
+# not auditing at all: a check that always cries wolf stops being read. Excluded by tag.
+# Anything else in the account (pre-existing resources from other projects) is likewise
+# not this stack's business, so the count is scoped rather than account-wide.
+EIPS=$($AWSC ec2 describe-addresses \
+        --query 'length(Addresses[?!(Tags[?Key==`Role` && Value==`ingress-static-ip`])])' \
+        --output text 2>/dev/null || echo 0)
+[ "$(count_or_zero "$EIPS")" != "0" ] && add_leftover "Unexpected Elastic IP(s) still allocated: ${EIPS} (billing ~\$0.005/hr each; the tagged ingress IP is excluded and is meant to persist)"
 
-VOLS=$($AWSC ec2 describe-volumes --filters "Name=status,Values=available,in-use" \
-        --query 'length(Volumes)' --output text 2>/dev/null || echo 0)
-[ "$(count_or_zero "$VOLS")" != "0" ] && add_leftover "EBS volume(s) still present: ${VOLS} (billing ~\$0.08/GB-month)"
+# Only volumes this cluster created. The CSI driver names dynamically provisioned volumes
+# "${cluster}-dynamic-pvc-*", so an unattached one of those is an orphaned PVC — exactly
+# what a wedged pod leaves behind, and exactly what went unnoticed on 2026-09-22.
+VOLS=$($AWSC ec2 describe-volumes --filters "Name=status,Values=available" \
+        --query "length(Volumes[?Tags[?Key=='Name' && starts_with(Value, '${CLUSTER}')]])" \
+        --output text 2>/dev/null || echo 0)
+[ "$(count_or_zero "$VOLS")" != "0" ] && add_leftover "Orphaned EBS volume(s) from this cluster: ${VOLS} (billing ~\$0.08/GB-month) — delete with: aws ec2 delete-volume --volume-id <id>"
 
 NATS=$($AWSC ec2 describe-nat-gateways --filter "Name=state,Values=available,pending" \
         --query 'length(NatGateways)' --output text 2>/dev/null || echo 0)
