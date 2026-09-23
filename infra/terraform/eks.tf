@@ -19,10 +19,13 @@ module "eks" {
     default = {
       instance_types = var.node_instance_types
       capacity_type  = var.node_capacity_type
-      min_size       = var.node_desired_size
-      max_size       = var.node_desired_size
-      desired_size   = var.node_desired_size
-      subnet_ids     = var.enable_nat_gateway ? module.vpc.private_subnets : module.vpc.public_subnets
+      # min and max must differ or there is nothing for Cluster Autoscaler to do: it
+      # moves the ASG's desired capacity inside this range, and a group pinned at
+      # min == max silently ignores every scale-up decision it makes.
+      min_size     = var.node_min_size
+      max_size     = var.node_max_size
+      desired_size = var.node_desired_size
+      subnet_ids   = var.enable_nat_gateway ? module.vpc.private_subnets : module.vpc.public_subnets
     }
   }
 

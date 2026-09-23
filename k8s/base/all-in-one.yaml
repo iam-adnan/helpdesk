@@ -96,6 +96,23 @@ spec:
             limits:
               memory: "128Mi"
               cpu: "200m"
+          # An exec probe is usable here precisely because redis:7-alpine ships a shell
+          # and redis-cli. The backend family cannot do this — those images are
+          # distroless, with no shell and no client binaries, which is also why celery
+          # and slack-bot get no probes: they expose no HTTP surface to check and there
+          # is no safe command to exec. A wrong probe on them would restart healthy
+          # workers in a loop, which is worse than no probe at all.
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 3
 
 ---
 apiVersion: v1
@@ -242,6 +259,32 @@ spec:
             limits:
               memory: "256Mi"
               cpu: "300m"
+          # Self-healing. Without these, Kubernetes only restarts a container whose
+          # PROCESS has exited — a Next.js server that is still running but wedged keeps
+          # receiving traffic forever, and ingress-nginx keeps routing to it because
+          # nothing has told it otherwise.
+          #
+          # readiness gates traffic, liveness restarts the container, and they are
+          # deliberately not the same check: a pod that is merely slow to warm up should
+          # be taken out of the Service, not killed. This also matters more now that the
+          # HPA can add replicas — a new pod must not receive requests until it can
+          # actually serve them.
+          readinessProbe:
+            httpGet:
+              path: /login
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /login
+              port: 3000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            # Three consecutive failures, not one. A single missed check during a GC
+            # pause or a burst is not a dead process, and restarting on it would turn
+            # load into an outage — exactly when the app can least afford it.
+            failureThreshold: 3
 
 ---
 apiVersion: v1
