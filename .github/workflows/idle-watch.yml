@@ -1,0 +1,257 @@
+# ============================================================================
+# Idle-cluster watchdog — §7.3 of the EKS static-IP design.
+#
+# The account's primary threat is not a bad deploy, it is a cluster nobody
+# remembers is running. On 2026-09-22 a teardown stalled on a finalizer deadlock,
+# printed "Still destroying..." to a terminal nobody was watching, and the cluster
+# billed overnight. destroy.sh now handles that specific deadlock, but a script can
+# only protect the teardowns somebody actually starts. This covers the rest.
+#
+# It runs in GitHub Actions rather than on the operator's machine on purpose: the
+# failure it exists to catch happens precisely when that machine is asleep.
+#
+# WARN ONLY. This workflow makes no mutating AWS call of any kind — every command
+# below is a Describe/Get. Auto-destroy is deliberately out of scope (design §7.3:
+# "a half-considered auto-destroy is more dangerous than none"), and a watchdog that
+# could take the cluster down mid-demo would be worse than the problem it solves.
+#
+# Required (already present on this repo):
+#   secret AWS_INFRA_ROLE_ARN  — bootstrap stack's github_infra_role_arn
+#   secret SLACK_WEBHOOK_URL   — the same Incoming Webhook cicd.yml notifies through
+#   var    EKS_CLUSTER_NAME    — defaults to helpdesk-eks if unset
+#
+# Tunable without touching this file, via repo variables:
+#   IDLE_WATCH_QUIET_HOURS  (default 12) — silence below this age. Raise it for a
+#                                          planned long run so the alerts stay
+#                                          meaningful; a check that always cries
+#                                          wolf stops being read.
+#   IDLE_WATCH_RATE_USD     (default 0.29) — $/hr used for the burn estimate. This
+#                                          is CLAUDE.md's figure for c7i-flex.large
+#                                          nodes; the design doc's $0.182 predates
+#                                          the instance-type change.
+#   IDLE_WATCH_CREDIT_FLOOR (default 10) — below this many dollars of remaining
+#                                          credit, escalate regardless of age.
+# ============================================================================
+
+name: Idle Cluster Watchdog
+
+on:
+  schedule:
+    # Every 2 hours. GitHub's scheduler drifts under load and is best-effort, which
+    # is fine — this measures a cluster's age in hours, not minutes.
+    - cron: "0 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      force_quiet_hours:
+        description: "Override the quiet threshold for this run (e.g. 0 to force a message). Blank = use the repo variable."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: idle-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: "🕒 Check for an idle cluster"
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME || 'helpdesk-eks' }}
+      QUIET_HOURS: ${{ inputs.force_quiet_hours != '' && inputs.force_quiet_hours || vars.IDLE_WATCH_QUIET_HOURS || '12' }}
+      RATE_USD: ${{ vars.IDLE_WATCH_RATE_USD || '0.29' }}
+      CREDIT_FLOOR: ${{ vars.IDLE_WATCH_CREDIT_FLOOR || '10' }}
+      # Job-level, not step-level: the `env` context a step's own `if:` sees is the
+      # workflow/job one, so a step-scoped value would read as empty and the guard
+      # would skip the notify every time. cicd.yml does the same for this reason.
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_INFRA_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Assess cluster age and account burn
+        id: assess
+        run: |
+          set -uo pipefail
+
+          # aws prints RFC3339 with fractional seconds ("...:44.123000+00:00"), which
+          # GNU date refuses to parse. Strip the fraction before converting.
+          epoch_of() {
+            date -u -d "$(printf '%s' "$1" | sed -E 's/\.[0-9]+//')" +%s 2>/dev/null || echo ""
+          }
+
+          NOW=$(date -u +%s)
+
+          CREATED=$(aws eks describe-cluster --name "$CLUSTER_NAME" \
+            --query 'cluster.createdAt' --output text 2>/dev/null) || CREATED=""
+          STATUS=$(aws eks describe-cluster --name "$CLUSTER_NAME" \
+            --query 'cluster.status' --output text 2>/dev/null) || STATUS=""
+
+          # --- Credit position. Never fails the run; "unknown" is a valid answer. ---
+          CREDITS=$(aws freetier get-account-plan-state --region us-east-1 \
+            --query 'accountPlanRemainingCredits.amount' --output text 2>/dev/null) || CREDITS=""
+          EXPIRES=$(aws freetier get-account-plan-state --region us-east-1 \
+            --query 'accountPlanExpirationDate' --output text 2>/dev/null) || EXPIRES=""
+          if [ -z "$CREDITS" ] || [ "$CREDITS" = "None" ]; then CREDITS="unknown"; fi
+
+          EXPIRY_HOURS=""
+          if [ -n "$EXPIRES" ] && [ "$EXPIRES" != "None" ]; then
+            EXP_EPOCH=$(epoch_of "$EXPIRES")
+            [ -n "$EXP_EPOCH" ] && EXPIRY_HOURS=$(awk -v a="$EXP_EPOCH" -v b="$NOW" 'BEGIN{printf "%.0f",(a-b)/3600}')
+          fi
+
+          # ================================================================
+          # No cluster — check that the last teardown actually finished.
+          # ================================================================
+          # "terraform destroy reported success" and "nothing is billing" are
+          # different claims. A destroy that dies partway leaves no cluster but
+          # keeps the expensive parts: this is the 09-22 shape exactly, and a
+          # pure age check would report all-clear through it.
+          if [ -z "$CREATED" ] || [ "$CREATED" = "None" ]; then
+            ORPHANS=""
+
+            INSTANCES=$(aws ec2 describe-instances \
+              --filters "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+              --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null)
+            [ -n "$INSTANCES" ] && ORPHANS="${ORPHANS}• EC2 instances: ${INSTANCES}\n"
+
+            # The ingress EIP is preserved by the bootstrap stack on purpose, so it
+            # is never an orphan. Anything else unassociated is.
+            STRAY_EIPS=$(aws ec2 describe-addresses \
+              --query "Addresses[?AssociationId==null && !(Tags[?Key=='Role' && Value=='ingress-static-ip'])].PublicIp" \
+              --output text 2>/dev/null)
+            [ -n "$STRAY_EIPS" ] && ORPHANS="${ORPHANS}• Unassociated Elastic IPs: ${STRAY_EIPS}\n"
+
+            VOLUMES=$(aws ec2 describe-volumes --query 'Volumes[].VolumeId' --output text 2>/dev/null)
+            [ -n "$VOLUMES" ] && ORPHANS="${ORPHANS}• EBS volumes: ${VOLUMES}\n"
+
+            LBS=$(aws elbv2 describe-load-balancers \
+              --query 'LoadBalancers[].LoadBalancerName' --output text 2>/dev/null)
+            [ -n "$LBS" ] && ORPHANS="${ORPHANS}• Load balancers: ${LBS}\n"
+
+            NATS=$(aws ec2 describe-nat-gateways \
+              --filter "Name=state,Values=pending,available,deleting" \
+              --query 'NatGateways[].NatGatewayId' --output text 2>/dev/null)
+            [ -n "$NATS" ] && ORPHANS="${ORPHANS}• NAT gateways: ${NATS}\n"
+
+            if [ -n "$ORPHANS" ]; then
+              {
+                echo "notify=true"
+                echo "emoji=:zombie:"
+                echo "headline=Teardown left billable resources behind"
+                echo "detail<<EOF"
+                printf '%b' "$ORPHANS"
+                echo "Credits remaining: \$${CREDITS}"
+                echo "EOF"
+              } >> "$GITHUB_OUTPUT"
+              echo "::warning::Orphaned billable resources found with no cluster present."
+            else
+              echo "notify=false" >> "$GITHUB_OUTPUT"
+              echo "No cluster, nothing billable outstanding — clean. Staying quiet."
+            fi
+            exit 0
+          fi
+
+          # ================================================================
+          # A cluster exists — how long has it been there, and what has it cost?
+          # ================================================================
+          CREATED_EPOCH=$(epoch_of "$CREATED")
+          if [ -z "$CREATED_EPOCH" ]; then
+            echo "::error::Could not parse cluster createdAt: $CREATED"
+            exit 1
+          fi
+
+          AGE_HOURS=$(awk -v a="$NOW" -v b="$CREATED_EPOCH" 'BEGIN{printf "%.1f",(a-b)/3600}')
+          BURN=$(awk -v h="$AGE_HOURS" -v r="$RATE_USD" 'BEGIN{printf "%.2f",h*r}')
+
+          echo "cluster=$CLUSTER_NAME status=$STATUS age=${AGE_HOURS}h burn=\$${BURN} credits=\$${CREDITS} quiet=${QUIET_HOURS}h"
+
+          # --- Tier. Age drives it; the credit position can override upward. ---
+          WARN2=$(awk -v q="$QUIET_HOURS" 'BEGIN{print q*2}')
+          WARN3=$(awk -v q="$QUIET_HOURS" 'BEGIN{print q*3}')
+
+          TIER="silent"
+          awk -v a="$AGE_HOURS" -v q="$QUIET_HOURS" 'BEGIN{exit !(a>=q)}'  && TIER="info"
+          awk -v a="$AGE_HOURS" -v w="$WARN2"       'BEGIN{exit !(a>=w)}'  && TIER="warn"
+          awk -v a="$AGE_HOURS" -v w="$WARN3"       'BEGIN{exit !(a>=w)}'  && TIER="urgent"
+
+          # The credit override. This is the condition that actually matters near the
+          # end of a plan window: a cluster can be well inside its quiet hours and
+          # still be the thing that empties the account.
+          OVERRIDE=""
+          if [ "$CREDITS" != "unknown" ]; then
+            if awk -v c="$CREDITS" -v f="$CREDIT_FLOOR" 'BEGIN{exit !(c<f)}'; then
+              TIER="urgent"
+              OVERRIDE="Credit balance is below \$${CREDIT_FLOOR}."
+            fi
+          fi
+          if [ -n "$EXPIRY_HOURS" ] && [ "$EXPIRY_HOURS" -lt 48 ] 2>/dev/null; then
+            TIER="urgent"
+            OVERRIDE="${OVERRIDE:+$OVERRIDE }Free plan expires in ${EXPIRY_HOURS}h."
+          fi
+
+          if [ "$TIER" = "silent" ]; then
+            echo "notify=false" >> "$GITHUB_OUTPUT"
+            echo "Cluster is ${AGE_HOURS}h old, under the ${QUIET_HOURS}h quiet threshold. Staying quiet."
+            exit 0
+          fi
+
+          case "$TIER" in
+            info)   EMOJI=":information_source:"; HEAD="Cluster has been up ${AGE_HOURS}h" ;;
+            warn)   EMOJI=":warning:";            HEAD="Cluster still up after ${AGE_HOURS}h" ;;
+            urgent) EMOJI=":rotating_light:";     HEAD="Cluster up ${AGE_HOURS}h — tear it down" ;;
+          esac
+
+          {
+            echo "notify=true"
+            echo "emoji=$EMOJI"
+            echo "headline=$HEAD"
+            echo "detail<<EOF"
+            echo "Cluster: \`${CLUSTER_NAME}\` (${STATUS})"
+            echo "Estimated spend this run: \$${BURN} at \$${RATE_USD}/hr"
+            echo "Credits remaining: \$${CREDITS}"
+            [ -n "$OVERRIDE" ] && echo "$OVERRIDE"
+            [ "$TIER" = "info" ] && echo "_Fine if this is intentional — no action needed._"
+            [ "$TIER" != "info" ] && echo "Run \`./infra/scripts/destroy.sh\` when you are done with it."
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # Built with jq rather than an inline heredoc so a resource name containing a
+      # quote or backslash cannot produce malformed JSON and silently drop the alert.
+      #
+      # The step outputs are passed through `env:` rather than `${{ }}` interpolated
+      # into the script body. Interpolation happens before bash parses the line, so a
+      # quote anywhere in a resource name would break the command itself — the exact
+      # class of bug the jq call is here to prevent.
+      - name: Build Slack payload
+        if: steps.assess.outputs.notify == 'true'
+        env:
+          EMOJI: ${{ steps.assess.outputs.emoji }}
+          HEADLINE: ${{ steps.assess.outputs.headline }}
+          DETAIL: ${{ steps.assess.outputs.detail }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          jq -n \
+            --arg emoji   "$EMOJI" \
+            --arg head    "$HEADLINE" \
+            --arg detail  "$DETAIL" \
+            --arg run_url "$RUN_URL" \
+            '{text: ($emoji + " *" + $head + "*\n" + $detail + "\n<" + $run_url + "|watchdog run>")}' \
+            > slack-payload.json
+          cat slack-payload.json
+
+      - name: Slack notify
+        if: steps.assess.outputs.notify == 'true' && env.SLACK_WEBHOOK_URL != ''
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload-file-path: ./slack-payload.json

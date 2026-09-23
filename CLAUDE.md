@@ -66,6 +66,11 @@ The main stack uses a **partial S3 backend** — `bucket` is absent from `backen
 
 CI equivalents: `.github/workflows/infra.yml` (`workflow_dispatch` only — plan/apply/destroy, destroy needs `DESTROY` typed in). Deliberately not on `push`: creating the cluster on every commit would drain the account.
 
+`.github/workflows/idle-watch.yml` is the idle-cluster watchdog (design §7.3). Every 2h it reads the cluster's age and the remaining credit and pings Slack once past a threshold; it **never** mutates anything, so it cannot take the cluster down mid-demo. It runs in Actions rather than on the operator's machine because the failure it exists to catch — a stalled teardown billing overnight — happens exactly when that machine is asleep. Two behaviours worth knowing:
+
+- **Tune it with repo variables, not edits**: `IDLE_WATCH_QUIET_HOURS` (default 12) silences it below that age, `IDLE_WATCH_RATE_USD` (default 0.29) sets the burn estimate, `IDLE_WATCH_CREDIT_FLOOR` (default 10) forces an urgent ping regardless of age. Raise the quiet hours for a deliberately long run — an alert that always fires stops being read.
+- **It also catches the no-cluster case.** A destroy that dies partway leaves no cluster but keeps the billable parts, so an age check alone would report all-clear through the exact incident that motivated this. When `describe-cluster` finds nothing it audits for surviving instances, volumes, load balancers, NAT gateways, and unassociated EIPs — excluding the tagged ingress EIP the bootstrap stack preserves on purpose.
+
 ## Architecture
 
 **Two independent deploy targets exist in this repo, don't conflate them:**
