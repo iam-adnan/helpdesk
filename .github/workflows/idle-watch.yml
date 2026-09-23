@@ -96,10 +96,22 @@ jobs:
             --query 'cluster.status' --output text 2>/dev/null) || STATUS=""
 
           # --- Credit position. Never fails the run; "unknown" is a valid answer. ---
-          CREDITS=$(aws freetier get-account-plan-state --region us-east-1 \
-            --query 'accountPlanRemainingCredits.amount' --output text 2>/dev/null) || CREDITS=""
-          EXPIRES=$(aws freetier get-account-plan-state --region us-east-1 \
-            --query 'accountPlanExpirationDate' --output text 2>/dev/null) || EXPIRES=""
+          #
+          # But "unknown" silently disables the credit-floor override below, which is the
+          # guard that matters most as a plan nears expiry — so when the call fails, say
+          # why in the log rather than swallowing it. One call, reused for both fields:
+          # two separate invocations doubled the chance of a partial answer.
+          PLAN_JSON=$(aws freetier get-account-plan-state --region us-east-1 --output json 2>&1) || {
+            echo "::warning::freetier get-account-plan-state failed — credit-based escalation is disabled this run."
+            echo "  aws said: $(printf '%s' "$PLAN_JSON" | head -c 300)"
+            PLAN_JSON=""
+          }
+          CREDITS=""
+          EXPIRES=""
+          if [ -n "$PLAN_JSON" ]; then
+            CREDITS=$(printf '%s' "$PLAN_JSON" | jq -r '.accountPlanRemainingCredits.amount // empty' 2>/dev/null)
+            EXPIRES=$(printf '%s' "$PLAN_JSON" | jq -r '.accountPlanExpirationDate // empty' 2>/dev/null)
+          fi
           if [ -z "$CREDITS" ] || [ "$CREDITS" = "None" ]; then CREDITS="unknown"; fi
 
           EXPIRY_HOURS=""
