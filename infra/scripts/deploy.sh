@@ -275,7 +275,7 @@ cat <<EOF
  skip the deploy entirely.
 
 -------------------------------------------------------------------------------
- THIS CLUSTER IS NOW BILLING AT ~$0.29/hr (~$7.00/day)
+ THIS CLUSTER IS NOW BILLING AT ~\$0.29/hr (~\$7.00/day)
  Run infra/scripts/destroy.sh when you are done with it.
 -------------------------------------------------------------------------------
 
