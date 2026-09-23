@@ -122,7 +122,7 @@ slack_deploy_success() {
 *Duration:* $((secs / 60))m $((secs % 60))s
 *Credits remaining:* \$$(credits_remaining)
 
-_Cluster is now billing at ~\$0.182/hr. Run \`infra/scripts/destroy.sh\` when you're done._"
+_Cluster is now billing at ~$0.29/hr. Run \`infra/scripts/destroy.sh\` when you're done._"
 }
 
 # slack_deploy_failure <stage> <log_tail>

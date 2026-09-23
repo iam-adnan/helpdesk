@@ -151,20 +151,29 @@ echo "==> kubectl apply -k k8s/eks/"
 #
 # So: capture whatever real images are deployed now, apply, then put them back. On a
 # first deploy there is nothing to capture and this is a no-op.
+#
+# PREV_COUNT is tracked by hand rather than read from ${#PREV_IMAGES[@]}. `declare -A`
+# alone does not make an array "set" — it stays unset until the first element is
+# assigned, so under `set -u` expanding an empty one aborts the script with
+# "PREV_IMAGES: unbound variable". That is still true on bash 5.2, and it fires on
+# exactly the run where this block is supposed to do nothing: the first deploy to a
+# fresh cluster, after terraform has already succeeded. `${#PREV_IMAGES[@]-0}` is not a
+# workaround — array length takes no fallback and bash rejects it as a bad substitution.
 declare -A PREV_IMAGES
+PREV_COUNT=0
 for d in backend celery frontend slack-bot; do
   img=$(kubectl -n helpdesk get deploy "$d" \
     -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
   case "$img" in
     ""|*PLACEHOLDER*) ;;                       # absent, or never deployed for real
-    *) PREV_IMAGES["$d"]="$img" ;;
+    *) PREV_IMAGES["$d"]="$img"; PREV_COUNT=$((PREV_COUNT + 1)) ;;
   esac
 done
 
 kubectl apply -k "${REPO_ROOT}/k8s/eks/" 2>&1 | tee "$LOG_FILE" || fail "kubectl apply"
 
-if [ ${#PREV_IMAGES[@]} -gt 0 ]; then
-  echo "    restoring ${#PREV_IMAGES[@]} live image(s) the apply reset to placeholders"
+if [ "$PREV_COUNT" -gt 0 ]; then
+  echo "    restoring ${PREV_COUNT} live image(s) the apply reset to placeholders"
   for d in "${!PREV_IMAGES[@]}"; do
     img="${PREV_IMAGES[$d]}"
     if [ "$d" = "backend" ]; then
@@ -185,34 +194,49 @@ fi
 # script's; this script's contract is that the CLUSTER and the STATIC IP are ready.
 echo
 echo "==> Waiting for ingress-nginx to be serving"
-kubectl -n ingress-nginx rollout status deployment/ingress-nginx-controller --timeout=300s \
+# DAEMONSET, not deployment. addons.tf runs the controller as a hostNetwork DaemonSet so
+# every node binds :80/:443 itself (there is no load balancer on this account to put in
+# front of it). Waiting on deployment/ingress-nginx-controller queries an object that has
+# not existed since that change and fails "NotFound" every time — after terraform has
+# already succeeded and the manifests are applied, so the cluster is fine and only the
+# script reports failure.
+kubectl -n ingress-nginx rollout status daemonset/ingress-nginx-controller --timeout=300s \
   2>&1 | tee "$LOG_FILE" || fail "ingress-nginx rollout"
 
 # ---------------------------------------------------------------------------
-# Verify the static IP is actually what the NLB answers on
+# Verify the static IP is actually attached to something that serves
 # ---------------------------------------------------------------------------
 #
-# Terraform having allocated the EIP does NOT prove the NLB picked it up — a mismatched
-# eip-allocations/subnets count, for instance, silently yields AWS-assigned addresses
-# instead. Assert it rather than assume it.
+# There is no NLB — this account cannot create load balancers at all, so static_ip.tf
+# associates the EIP with a node's PRIMARY ENI and ingress-nginx answers on that node's
+# :80 directly. Terraform having allocated the address does NOT prove the association
+# survived; associating by instance_id silently fails on any EKS node, because the VPC
+# CNI attaches secondary ENIs for pod IPs. Assert it rather than assume it.
 
 echo
-echo "==> Verifying NLB is bound to the Elastic IP"
-NLB_OK=""
+echo "==> Verifying the Elastic IP is attached to a node ENI"
+# Identify the ENI by its ID and the instance it hangs off, NOT by its Description. A
+# node's primary ENI has an EMPTY description — only an ELB-managed ENI carries one
+# ("ELB net/..."). Reading Description was correct against the old NLB design and
+# silently became a check that can never pass: it spent 20 × 15s on a healthy cluster
+# and then warned the address was unattached while it demonstrably was. A check that
+# always cries wolf stops being read.
+EIP_OK=""
 for i in $(seq 1 20); do
-  MAPPED=$(aws ec2 describe-network-interfaces \
+  read -r ENI_ID ENI_INST <<<"$(aws ec2 describe-network-interfaces \
     --profile "$AWS_PROFILE" --region "$AWS_REGION" \
     --filters "Name=association.public-ip,Values=${WEBSITE_IP}" \
-    --query 'NetworkInterfaces[0].Description' --output text 2>/dev/null || echo "None")
-  if [ "$MAPPED" != "None" ] && [ -n "$MAPPED" ]; then
-    echo "    bound: ${MAPPED}"
-    NLB_OK="yes"
+    --query 'NetworkInterfaces[0].[NetworkInterfaceId,Attachment.InstanceId]' \
+    --output text 2>/dev/null || echo "None None")"
+  if [ -n "${ENI_ID:-}" ] && [ "${ENI_ID}" != "None" ]; then
+    echo "    bound: ${WEBSITE_IP} -> ${ENI_ID} on ${ENI_INST}"
+    EIP_OK="yes"
     break
   fi
-  echo "    waiting for the NLB to claim ${WEBSITE_IP}... ($i/20)"
+  echo "    waiting for a node to claim ${WEBSITE_IP}... ($i/20)"
   sleep 15
 done
-[ -n "$NLB_OK" ] || echo "WARNING: ${WEBSITE_IP} is not attached to any ENI yet — the NLB may still be provisioning." >&2
+[ -n "$EIP_OK" ] || echo "WARNING: ${WEBSITE_IP} is not attached to any ENI yet — check static_ip.tf's association." >&2
 
 END_TS=$(date +%s)
 DURATION=$((END_TS - START_TS))
@@ -245,7 +269,7 @@ cat <<EOF
  skip the deploy entirely.
 
 -------------------------------------------------------------------------------
- THIS CLUSTER IS NOW BILLING AT ~\$0.182/hr (~\$4.37/day)
+ THIS CLUSTER IS NOW BILLING AT ~$0.29/hr (~$7.00/day)
  Run infra/scripts/destroy.sh when you are done with it.
 -------------------------------------------------------------------------------
 
