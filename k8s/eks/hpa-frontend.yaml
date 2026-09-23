@@ -1,0 +1,46 @@
+# HorizontalPodAutoscaler — frontend ONLY, and that limit is a correctness
+# requirement rather than a starting point.
+#
+# backend, celery and slack-bot cannot be scaled. The database is SQLite on a
+# ReadWriteOnce PersistentVolume (k8s/base/all-in-one.yaml's sqlite-pvc): a second
+# replica landing on another node cannot mount the volume at all, and two replicas that
+# DID share it would corrupt it, because SQLite's locking assumes a single writer on a
+# local filesystem. CLAUDE.md records this as a design invariant — scaling the backend
+# means migrating to a real database server first, not raising a replica count.
+#
+# frontend is stateless (Next.js serving rendered pages, talking to the backend over
+# HTTP), so it is the one component that can safely take more replicas.
+#
+# Targeting CPU utilisation requires the container to declare a CPU REQUEST — the
+# percentage is measured against the request, not the limit, and a pod without one is
+# reported as <unknown> and never scales. frontend requests 100m (limit 300m), so 70%
+# here means ~70m of actual CPU per pod before another is added.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: frontend
+  namespace: helpdesk
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: frontend
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      # Default is a 0s window, which reacts to a single scrape and can double the
+      # replica count off one spike. 30s still responds inside a demo.
+      stabilizationWindowSeconds: 30
+    scaleDown:
+      # Deliberately slow. Scaling in the moment traffic dips, then back out when it
+      # returns, costs more than simply holding the pods — and on this cluster a
+      # removed pod can take a node with it.
+      stabilizationWindowSeconds: 300

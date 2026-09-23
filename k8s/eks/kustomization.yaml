@@ -14,6 +14,9 @@ resources:
   - externalsecret-alertmanager-slack.yaml
   # Grafana Cloud remote_write credentials for Prometheus.
   - externalsecret-grafana-cloud.yaml
+  # Autoscaling for the one Deployment that can take it — see the file's header for
+  # why backend/celery/slack-bot are excluded (SQLite on a ReadWriteOnce volume).
+  - hpa-frontend.yaml
   # In-cluster Grafana is disabled (infra/terraform/variables.tf's grafana_cloud_enabled),
   # so its admin-credentials secret and its /grafana Ingress would both point at a
   # Service that no longer exists. Re-enable these two alongside grafana_cloud_enabled=false.
@@ -30,6 +33,21 @@ patches:
   - path: patch-fsgroup.yaml
   # Uncomment together with externalsecret-dockerhub.yaml above, for PRIVATE repos only:
   # - path: patch-imagepullsecrets.yaml
+
+  # Drop spec.replicas from the frontend Deployment so the HPA owns the replica count.
+  # The base manifest declares `replicas: 1`; leaving it in place means every
+  # `kubectl apply -k` (deploy.sh AND the CI deploy job, which runs on every merge to
+  # main) writes 1 back and collapses whatever the HPA had scaled to, until the HPA
+  # notices and scales out again. Removing the field entirely is what lets an
+  # autoscaled Deployment survive a redeploy.
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: frontend
+    patch: |-
+      - op: remove
+        path: /spec/replicas
 
 # NOTE: images are NOT rewritten here via Kustomize's `images:` transformer. The base
 # manifest's BACKEND_IMAGE_PLACEHOLDER / FRONTEND_IMAGE_PLACEHOLDER tokens (confirmed

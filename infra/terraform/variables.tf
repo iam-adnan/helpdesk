@@ -53,8 +53,37 @@ variable "node_instance_types" {
 }
 
 variable "node_desired_size" {
-  type    = number
-  default = 2
+  description = <<-EOT
+    Nodes the group starts with. Cluster Autoscaler moves the ASG's desired capacity
+    between node_min_size and node_max_size from here on.
+
+    NOTE: a later `terraform apply` writes this value back to the ASG, so an apply that
+    lands while the cluster is scaled out will scale it back in. Harmless — the
+    autoscaler adds the node again within a minute if the load is still there — but it
+    is why a scale-out can appear to "undo itself" right after a deploy.
+  EOT
+  type        = number
+  default     = 2
+}
+
+variable "node_min_size" {
+  description = <<-EOT
+    Floor for Cluster Autoscaler. Two, not one: the backend family is single-writer
+    (SQLite on a ReadWriteOnce volume, see CLAUDE.md) so the app cannot survive on
+    fewer nodes than the ingress DaemonSet needs to keep serving during a node
+    replacement.
+  EOT
+  type        = number
+  default     = 2
+}
+
+variable "node_max_size" {
+  description = <<-EOT
+    Ceiling for Cluster Autoscaler. Three c7i-flex.large = 6 of this account's 8 vCPU
+    quota, and each added node costs ~$0.085/hr for as long as it is up.
+  EOT
+  type        = number
+  default     = 3
 }
 
 variable "node_capacity_type" {

@@ -195,3 +195,71 @@ resource "helm_release" "ingress_nginx" {
     helm_release.aws_load_balancer_controller,
   ]
 }
+
+# ---------------------------------------------------------------------------
+# Cluster Autoscaler — adds and removes NODES
+# ---------------------------------------------------------------------------
+#
+# Reacts to PENDING PODS, not to traffic. Load alone never adds a node: requests make
+# the existing pods busy, and a busy pod is not an unschedulable one. The chain that
+# actually scales this cluster is
+#
+#   load -> HPA adds frontend pods -> no node has room -> autoscaler adds a node
+#
+# so the HPA in k8s/eks/hpa-frontend.yaml is not an optional extra here; without it
+# this controller has nothing to react to.
+#
+# Auto-discovery finds the node group by the tags the EKS module already puts on the
+# ASG (k8s.io/cluster-autoscaler/enabled=true and .../<cluster>=owned) — verified
+# against the live ASG rather than assumed, so no extra tagging is needed.
+resource "helm_release" "cluster_autoscaler" {
+  name       = "cluster-autoscaler"
+  repository = "https://kubernetes.github.io/autoscaler"
+  chart      = "cluster-autoscaler"
+  namespace  = "kube-system"
+
+  set {
+    name  = "autoDiscovery.clusterName"
+    value = var.cluster_name
+  }
+
+  set {
+    name  = "awsRegion"
+    value = var.aws_region
+  }
+
+  set {
+    name  = "rbac.serviceAccount.name"
+    value = "cluster-autoscaler"
+  }
+
+  set {
+    # Doubled backslashes on purpose: HCL consumes one level, leaving Helm the `\.` it
+    # needs to read "eks.amazonaws.com/role-arn" as one annotation key rather than
+    # descending into nested maps at every dot.
+    name  = "rbac.serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
+    value = module.cluster_autoscaler_irsa.iam_role_arn
+  }
+
+  # Default is 10 minutes. Shortened so a scale-down is observable inside a demo rather
+  # than long after everyone has stopped watching.
+  set {
+    name  = "extraArgs.scale-down-unneeded-time"
+    value = "2m"
+  }
+
+  set {
+    name  = "extraArgs.scale-down-delay-after-add"
+    value = "2m"
+  }
+
+  # Without this the autoscaler refuses to remove a node running any pod it did not
+  # place itself — which on this cluster means every node, because the ingress
+  # DaemonSet and kube-system pods are everywhere. Scale-down would never happen.
+  set {
+    name  = "extraArgs.skip-nodes-with-system-pods"
+    value = "false"
+  }
+
+  depends_on = [module.eks, module.cluster_autoscaler_irsa]
+}

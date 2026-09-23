@@ -114,6 +114,12 @@ terraform init -input=false -no-color -reconfigure \
   -backend-config="bucket=${STATE_BUCKET}" 2>&1 | tee "$LOG_FILE" || fail "terraform init"
 
 echo
+# Must run after init (it uses terraform state/import) and before plan (it changes what
+# the plan will contain). Without it, any rebuild within 30 days of a destroy fails on
+# six "already scheduled for deletion" errors.
+bash "${SCRIPT_DIR}/restore-pending-secrets.sh" 2>&1 | tee "$LOG_FILE" || fail "restore pending secrets"
+
+echo
 echo "==> terraform plan"
 terraform plan -input=false -no-color -out=tfplan 2>&1 | tee "$LOG_FILE" || fail "terraform plan"
 
