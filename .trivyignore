@@ -1,0 +1,38 @@
+# Trivy suppressions.
+#
+# Every entry needs a reason and a review date. An undocumented ignore is
+# indistinguishable from a forgotten one, and the whole point of gating the pipeline on
+# CRITICAL is lost if this file quietly grows into a way of making builds pass.
+#
+# Only affects the CRITICAL gate in .github/workflows/cicd.yml. The advisory
+# CRITICAL+HIGH table and the SARIF upload still report everything, so a suppressed
+# finding stays visible in the Security tab rather than disappearing.
+
+# ---------------------------------------------------------------------------
+# CVE-2025-64459 — Django SQL injection. CRITICAL. Suppressed, NOT dismissed.
+# ---------------------------------------------------------------------------
+# Installed 5.0.14; fixed in 5.2.8 / 5.1.14 / 4.2.26. There is deliberately no 5.0.x
+# fix — Django 5.0 reached end of life in April 2025 and will never receive one, so
+# this cannot be cleared by a patch bump. Clearing it means moving to 5.2 LTS, which
+# also forces djangorestframework 3.15.1 -> 3.18.x (3.18 requires django>=5.2) and
+# probably django-filter, simplejwt, cors-headers and celery-beat with it. That is five
+# or six coupled upgrades in a Django app, which is real work with real breakage risk,
+# not something to land days before a demo.
+#
+# Exposure in the meantime: the app is internal, behind email-domain-gated registration,
+# and reachable only from the cluster's ingress.
+#
+# REVIEW: 2026-10-01 — do the Django 5.2 LTS upgrade and delete this entry.
+CVE-2025-64459
+
+# ---------------------------------------------------------------------------
+# CVE-2026-31789 — OpenSSL heap buffer overflow. CRITICAL. Not applicable here.
+# ---------------------------------------------------------------------------
+# "Heap buffer overflow on 32-bit systems" — the nodes are c7i-flex.large, x86_64, and
+# both images are built for linux/amd64, so the 32-bit code path this depends on is
+# never compiled in. Kept as an explicit entry rather than left to chance: if the base
+# image picks up the patched libssl3 (3.0.19-1~deb12u2) this line simply stops matching
+# anything, which is the harmless outcome.
+#
+# REVIEW: 2026-10-01 — drop this once the base image ships the patched libssl3.
+CVE-2026-31789
