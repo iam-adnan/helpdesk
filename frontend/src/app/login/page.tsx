@@ -45,7 +45,7 @@ export default function LoginPage() {
             <div className="w-12 h-12 bg-accent rounded-xl flex items-center justify-center"><Shield className="w-7 h-7 text-white" /></div>
             <h1 className="text-2xl font-bold text-white">Mindstorm Helpdesk</h1>
           </div>
-          <p className="text-dark-400">Sign in to your workspace</p>
+          <p className="text-dark-400">Sign in to your support portal</p>
         </div>
         <div className="card">
           {error && <div className="mb-4 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-sm">{error}</div>}
